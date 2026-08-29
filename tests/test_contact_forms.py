@@ -2,7 +2,9 @@ from unittest.mock import patch
 
 from django.contrib import admin
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
 from django.core import mail
+from django.core.exceptions import PermissionDenied
 from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
 
@@ -180,6 +182,21 @@ class FormAndPluginTests(KururuFormsTestCase):
 
 
 class AdminTests(KururuFormsTestCase):
+    def staff_with_permissions(self, username, *codenames):
+        user = get_user_model().objects.create_user(
+            username=username,
+            email=f"{username}@example.test",
+            password="password",
+            is_staff=True,
+        )
+        user.user_permissions.add(
+            *Permission.objects.filter(
+                content_type__app_label="contact_forms",
+                codename__in=codenames,
+            )
+        )
+        return user
+
     def test_submission_content_requires_dedicated_permission(self):
         user = get_user_model().objects.create_user(
             username="staff", email="staff@example.test", password="password",
@@ -192,11 +209,53 @@ class AdminTests(KururuFormsTestCase):
 
     def test_duplicate_is_inactive_and_copies_fields(self):
         model_admin = ContactFormAdmin(ContactForm, admin.site)
+        request = RequestFactory().post("/admin/")
+        request.user = self.staff_with_permissions(
+            "duplicator", "view_contactform", "add_contactform"
+        )
         with patch.object(model_admin, "message_user"):
             model_admin.duplicate_forms(
-                RequestFactory().post("/admin/"),
+                request,
                 ContactForm.objects.filter(pk=self.form.pk),
             )
         clone = ContactForm.objects.exclude(pk=self.form.pk).get()
         self.assertFalse(clone.is_active)
         self.assertEqual(clone.fields.count(), self.form.fields.count())
+
+    def test_view_only_staff_cannot_see_or_execute_mutating_actions(self):
+        user = self.staff_with_permissions("viewer", "view_contactform")
+        request = RequestFactory().post("/admin/")
+        request.user = user
+        model_admin = ContactFormAdmin(ContactForm, admin.site)
+
+        actions = model_admin.get_actions(request)
+        self.assertNotIn("duplicate_forms", actions)
+        self.assertNotIn("archive_forms", actions)
+
+        queryset = ContactForm.objects.filter(pk=self.form.pk)
+        with self.assertRaises(PermissionDenied):
+            model_admin.duplicate_forms(request, queryset)
+        with self.assertRaises(PermissionDenied):
+            model_admin.archive_forms(request, queryset)
+
+        self.form.refresh_from_db()
+        self.assertTrue(self.form.is_active)
+        self.assertFalse(self.form.is_archived)
+        self.assertEqual(ContactForm.objects.count(), 1)
+
+    def test_action_visibility_matches_required_permissions(self):
+        model_admin = ContactFormAdmin(ContactForm, admin.site)
+
+        duplicate_request = RequestFactory().get("/admin/")
+        duplicate_request.user = self.staff_with_permissions(
+            "adder", "view_contactform", "add_contactform"
+        )
+        self.assertIn("duplicate_forms", model_admin.get_actions(duplicate_request))
+        self.assertNotIn("archive_forms", model_admin.get_actions(duplicate_request))
+
+        archive_request = RequestFactory().get("/admin/")
+        archive_request.user = self.staff_with_permissions(
+            "changer", "change_contactform"
+        )
+        self.assertNotIn("duplicate_forms", model_admin.get_actions(archive_request))
+        self.assertIn("archive_forms", model_admin.get_actions(archive_request))

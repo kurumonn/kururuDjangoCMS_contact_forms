@@ -73,6 +73,10 @@ class ContactFormAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+    def has_duplicate_permission(self, request, obj=None):
+        return self.has_view_permission(request, obj) and self.has_add_permission(request)
+
     def save_model(self, request, obj, form, change):
         obj._kururu_created_now = not change
         super().save_model(request, obj, form, change)
@@ -96,10 +100,14 @@ class ContactFormAdmin(admin.ModelAdmin):
                     order=order,
                 )
 
-    @admin.action(description="選択したフォームを複製")
+    @admin.action(description="選択したフォームを複製", permissions=["duplicate"])
     def duplicate_forms(self, request, queryset):
+        if not self.has_duplicate_permission(request):
+            raise PermissionDenied
         count = 0
         for source in queryset.prefetch_related("fields"):
+            if not self.has_duplicate_permission(request, source):
+                raise PermissionDenied
             base = slugify(source.slug + "-copy")[:90] or "form-copy"
             slug = base
             number = 2
@@ -136,8 +144,13 @@ class ContactFormAdmin(admin.ModelAdmin):
             count += 1
         self.message_user(request, f"{count}件を無効状態で複製しました。", messages.SUCCESS)
 
-    @admin.action(description="選択したフォームをアーカイブ")
+    @admin.action(description="選択したフォームをアーカイブ", permissions=["change"])
     def archive_forms(self, request, queryset):
+        if not self.has_change_permission(request):
+            raise PermissionDenied
+        for contact_form in queryset.only("pk"):
+            if not self.has_change_permission(request, contact_form):
+                raise PermissionDenied
         count = queryset.update(is_active=False, is_archived=True)
         self.message_user(request, f"{count}件をアーカイブしました。", messages.SUCCESS)
 
