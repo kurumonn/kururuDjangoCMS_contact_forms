@@ -61,6 +61,7 @@ def block_context(request, data):
 
 definition = PluginDefinition(
     key=PLUGIN_KEY,
+    api_version=1,
     name="Kururu Forms",
     version=__version__,
     description="DB先行保存とスパム対策を備えた問い合わせフォーム",

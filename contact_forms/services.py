@@ -11,7 +11,7 @@ from django.conf import settings
 from django.core import signing
 from django.core.exceptions import ImproperlyConfigured
 
-TOKEN_SALT = "kururu-forms-render-v1"
+SIGNING_NAMESPACE = "kururu-forms-render-v1"
 
 
 def ip_hash(ip: str) -> str:
@@ -41,13 +41,13 @@ def make_render_token(form_id: int, return_path: str) -> str:
             "return_path": safe_return_path(return_path),
             "shown_at": int(time.time()),
         },
-        salt=TOKEN_SALT,
+        salt=SIGNING_NAMESPACE,
         compress=True,
     )
 
 
 def load_render_token(token: str, form_id: int, minimum_fill_seconds: int):
-    data = signing.loads(token, salt=TOKEN_SALT, max_age=86_400)
+    data = signing.loads(token, salt=SIGNING_NAMESPACE, max_age=86_400)
     if data.get("form_id") != form_id:
         raise signing.BadSignature("form mismatch")
     if int(time.time()) - int(data.get("shown_at", 0)) < minimum_fill_seconds:

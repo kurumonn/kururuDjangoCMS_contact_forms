@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kururucms-contact-forms"
-version = "0.1.0"
+version = "0.2.0"
 description = "Secure, reusable contact form plugin for KururuCMS"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = "MIT"
 dependencies = ["Django>=5.2,<5.3"]
 
 [project.entry-points."kururucms.plugins"]
-contact_forms = "contact_forms.apps.ContactFormsConfig"
+contact_forms = "contact_forms.apps:ContactFormsConfig"
 
 [tool.setuptools.packages.find]
 include = ["contact_forms*"]
