@@ -1,3 +1,4 @@
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib import admin
@@ -5,8 +6,10 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.core import mail
 from django.core.exceptions import PermissionDenied
+from django.core.management import call_command
 from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from blog.blocks import block_editor_catalog, validate_blocks
 from blog.templatetags.block_tags import render_blocks
@@ -14,6 +17,7 @@ from cms_plugins.models import PluginActivation
 
 from contact_forms.forms import build_submission_form
 from contact_forms.admin import ContactFormAdmin, ContactSubmissionAdmin
+from contact_forms.mailer import process_next_delivery
 from contact_forms.models import (
     ContactField,
     ContactForm,
@@ -76,26 +80,52 @@ class KururuFormsTestCase(TestCase):
 
 
 class SubmissionTests(KururuFormsTestCase):
+    def drain_outbox(self):
+        while process_next_delivery("test-worker") is not None:
+            pass
+
     def test_submission_is_stored_before_notification_and_uses_fixed_from(self):
-        response = self.client.post(self.url, self.payload(), REMOTE_ADDR="198.51.100.10")
+        with patch("contact_forms.mailer.EmailMessage.send", wraps=None) as send:
+            response = self.client.post(
+                self.url,
+                self.payload(),
+                REMOTE_ADDR="198.51.100.10",
+            )
+            send.assert_not_called()
         self.assertRedirects(response, "/articles/example/", fetch_redirect_response=False)
         submission = ContactSubmission.objects.get()
         self.assertEqual(submission.payload["email"], "reader@example.test")
         self.assertNotEqual(submission.ip_hash, "198.51.100.10")
+        self.assertEqual(submission.status, ContactSubmission.Status.RECEIVED)
+        self.assertEqual(MailDelivery.objects.count(), 1)
+        self.assertEqual(len(mail.outbox), 0)
+
+        self.drain_outbox()
+        submission.refresh_from_db()
         self.assertEqual(submission.status, ContactSubmission.Status.DELIVERED)
+        self.assertEqual(MailDelivery.objects.count(), 2)
         self.assertEqual(len(mail.outbox), 2)
         self.assertEqual(mail.outbox[0].from_email, "forms@example.test")
         self.assertEqual(mail.outbox[0].reply_to, ["reader@example.test"])
 
     def test_mail_failure_does_not_lose_submission_or_store_exception_text(self):
+        setting = ContactPluginSetting.load()
+        setting.mail_max_attempts = 1
+        setting.save(update_fields=["mail_max_attempts"])
         with patch("contact_forms.mailer.EmailMessage.send", side_effect=RuntimeError("reader@example.test")):
             response = self.client.post(self.url, self.payload())
+            self.assertFalse(process_next_delivery("failing-worker"))
         self.assertEqual(response.status_code, 302)
         submission = ContactSubmission.objects.get()
         self.assertEqual(submission.status, ContactSubmission.Status.MAIL_FAILED)
         delivery = MailDelivery.objects.get(kind=MailDelivery.Kind.NOTIFICATION)
+        self.assertEqual(delivery.status, MailDelivery.Status.FAILED)
+        self.assertEqual(delivery.attempts, 1)
         self.assertEqual(delivery.last_error, "RuntimeError")
         self.assertNotIn("reader@", delivery.last_error)
+        self.assertFalse(
+            MailDelivery.objects.filter(kind=MailDelivery.Kind.AUTOREPLY).exists()
+        )
 
     def test_invalid_email_is_not_stored(self):
         response = self.client.post(self.url, self.payload(email="not-an-email"))
@@ -150,8 +180,92 @@ class SubmissionTests(KururuFormsTestCase):
         self.assertEqual(first.status_code, 302)
         self.assertEqual(second.status_code, 302)
         self.assertEqual(ContactSubmission.objects.count(), 1)
+        self.assertEqual(MailDelivery.objects.count(), 1)
+        self.assertEqual(len(mail.outbox), 0)
+
+        self.drain_outbox()
         self.assertEqual(MailDelivery.objects.count(), 2)
         self.assertEqual(len(mail.outbox), 2)
+
+    def test_stale_processing_delivery_is_reclaimed_after_worker_stops(self):
+        self.client.post(self.url, self.payload())
+        delivery = MailDelivery.objects.get()
+        now = timezone.now()
+        delivery.status = MailDelivery.Status.PROCESSING
+        delivery.attempts = 1
+        delivery.locked_at = now - timedelta(seconds=901)
+        delivery.locked_by = "stopped-worker"
+        delivery.save(
+            update_fields=["status", "attempts", "locked_at", "locked_by"]
+        )
+
+        self.assertTrue(process_next_delivery("replacement-worker", now=now))
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, MailDelivery.Status.SENT)
+        self.assertEqual(delivery.attempts, 2)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_management_command_processes_outbox_without_web_request(self):
+        self.client.post(self.url, self.payload())
+        self.assertEqual(len(mail.outbox), 0)
+
+        call_command(
+            "process_contact_mail_outbox",
+            once=True,
+            worker_id="command-worker",
+        )
+        call_command(
+            "process_contact_mail_outbox",
+            once=True,
+            worker_id="command-worker",
+        )
+
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertFalse(
+            MailDelivery.objects.exclude(status=MailDelivery.Status.SENT).exists()
+        )
+
+    def test_outbox_uses_exponential_backoff_and_stops_at_max_attempts(self):
+        setting = ContactPluginSetting.load()
+        setting.mail_max_attempts = 3
+        setting.mail_retry_base_seconds = 10
+        setting.save(
+            update_fields=["mail_max_attempts", "mail_retry_base_seconds"]
+        )
+        self.client.post(self.url, self.payload())
+        now = timezone.now()
+
+        with patch(
+            "contact_forms.mailer.EmailMessage.send",
+            side_effect=RuntimeError("SMTP unavailable"),
+        ) as send:
+            self.assertFalse(process_next_delivery("worker", now=now))
+            delivery = MailDelivery.objects.get()
+            self.assertEqual(delivery.status, MailDelivery.Status.PENDING)
+            self.assertEqual(delivery.available_at, now + timedelta(seconds=10))
+
+            self.assertIsNone(
+                process_next_delivery("worker", now=now + timedelta(seconds=9))
+            )
+            self.assertFalse(
+                process_next_delivery("worker", now=now + timedelta(seconds=10))
+            )
+            delivery.refresh_from_db()
+            self.assertEqual(delivery.available_at, now + timedelta(seconds=30))
+
+            self.assertFalse(
+                process_next_delivery("worker", now=now + timedelta(seconds=30))
+            )
+
+        delivery.refresh_from_db()
+        self.assertEqual(send.call_count, 3)
+        self.assertEqual(delivery.attempts, 3)
+        self.assertEqual(delivery.status, MailDelivery.Status.FAILED)
+        self.assertEqual(ContactSubmission.objects.get().status, ContactSubmission.Status.MAIL_FAILED)
+        self.assertFalse(
+            MailDelivery.objects.filter(kind=MailDelivery.Kind.AUTOREPLY).exists()
+        )
 
 
 class FormAndPluginTests(KururuFormsTestCase):

@@ -12,7 +12,7 @@ from cms_plugins.security import require_plugin_enabled
 from core.ratelimit import check_rate_limit, client_ip
 
 from .forms import build_submission_form, serializable_payload
-from .mailer import deliver_submission
+from .mailer import enqueue_submission
 from .models import ContactForm, ContactPluginSetting, ContactSubmission
 from .plugin import PLUGIN_KEY
 from .services import ip_hash, load_render_token
@@ -88,8 +88,7 @@ def submit(request, slug):
                 "page_path": token_data["return_path"],
             },
         )
-
-    if created:
-        deliver_submission(submission)
+        if created:
+            enqueue_submission(submission)
     messages.success(request, contact_form.success_message)
     return HttpResponseRedirect(token_data["return_path"])

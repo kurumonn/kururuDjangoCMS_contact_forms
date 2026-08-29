@@ -4,6 +4,7 @@ import re
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 FIELD_KEY = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
 
@@ -113,6 +114,7 @@ class MailDelivery(models.Model):
 
     class Status(models.TextChoices):
         PENDING = "pending", "送信待ち"
+        PROCESSING = "processing", "送信処理中"
         SENT = "sent", "送信済み"
         FAILED = "failed", "失敗"
 
@@ -121,6 +123,10 @@ class MailDelivery(models.Model):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     attempts = models.PositiveSmallIntegerField(default=0)
     last_error = models.CharField(max_length=500, blank=True)
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
+    locked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    locked_by = models.CharField(max_length=100, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -135,6 +141,13 @@ class ContactPluginSetting(models.Model):
     rate_window_seconds = models.PositiveIntegerField("制限時間（秒）", default=600)
     minimum_fill_seconds = models.PositiveSmallIntegerField("最短入力時間", default=2)
     default_retention_days = models.PositiveSmallIntegerField("既定保存日数", default=90)
+    mail_max_attempts = models.PositiveSmallIntegerField("メール最大試行回数", default=5)
+    mail_retry_base_seconds = models.PositiveIntegerField("メール再試行基準秒", default=60)
+    mail_lock_timeout_seconds = models.PositiveIntegerField("メールロック失効秒", default=900)
+    autorespond_after_notification_failure = models.BooleanField(
+        "管理者通知失敗後も自動返信する",
+        default=False,
+    )
 
     class Meta:
         verbose_name = "問い合わせフォーム設定"
@@ -147,6 +160,12 @@ class ContactPluginSetting(models.Model):
             raise ValidationError({"rate_limit": "上限は1〜100回です。"})
         if not 1 <= self.rate_window_seconds <= 86_400:
             raise ValidationError({"rate_window_seconds": "制限時間は1〜86400秒です。"})
+        if not 1 <= self.mail_max_attempts <= 20:
+            raise ValidationError({"mail_max_attempts": "最大試行回数は1〜20回です。"})
+        if not 1 <= self.mail_retry_base_seconds <= 3_600:
+            raise ValidationError({"mail_retry_base_seconds": "再試行基準秒は1〜3600秒です。"})
+        if not 30 <= self.mail_lock_timeout_seconds <= 86_400:
+            raise ValidationError({"mail_lock_timeout_seconds": "ロック失効秒は30〜86400秒です。"})
 
     @classmethod
     def load(cls):
