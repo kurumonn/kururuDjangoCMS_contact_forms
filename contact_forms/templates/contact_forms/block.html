@@ -1,0 +1,20 @@
+{% if contact_form %}
+  <section class="kururu-form" aria-labelledby="kururu-form-{{ contact_form.pk }}">
+    <h2 id="kururu-form-{{ contact_form.pk }}">{{ contact_form.name }}</h2>
+    <form method="post" action="{{ submit_url }}">
+      {% csrf_token %}
+      <input type="hidden" name="_render_token" value="{{ render_token }}">
+      <div hidden aria-hidden="true">
+        <label>会社URL <input type="text" name="_company" tabindex="-1" autocomplete="off"></label>
+      </div>
+      {% for field in submission_form %}
+        <div class="field">
+          {{ field.label_tag }}
+          {{ field }}
+          {% if field.help_text %}<p class="help">{{ field.help_text }}</p>{% endif %}
+        </div>
+      {% endfor %}
+      <button type="submit" class="btn btn--primary">送信</button>
+    </form>
+  </section>
+{% endif %}
