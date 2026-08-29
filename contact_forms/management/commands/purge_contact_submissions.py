@@ -8,6 +8,7 @@ from contact_forms.models import (
     ContactForm,
     ContactMaintenanceRun,
     ContactSubmission,
+    MailDelivery,
 )
 
 
@@ -29,6 +30,8 @@ class Command(BaseCommand):
                     expired = ContactSubmission.objects.filter(
                         form=form,
                         submitted_at__lt=cutoff,
+                    ).exclude(
+                        deliveries__status=MailDelivery.Status.PROCESSING
                     )
                     total += expired.count()
                     expired.delete()

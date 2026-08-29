@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -22,6 +23,7 @@ class ContactForm(models.Model):
         "保存日数",
         blank=True,
         null=True,
+        validators=[MinValueValidator(1), MaxValueValidator(3650)],
     )
     is_active = models.BooleanField("有効", default=False)
     is_archived = models.BooleanField("アーカイブ", default=False)
@@ -32,6 +34,15 @@ class ContactForm(models.Model):
         verbose_name = "問い合わせフォーム"
         verbose_name_plural = "問い合わせフォーム"
         ordering = ("name",)
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(retention_days__isnull=True)
+                    | models.Q(retention_days__gte=1, retention_days__lte=3650)
+                ),
+                name="contact_form_retention_days_range",
+            )
+        ]
 
     def __str__(self):
         return self.name
@@ -45,6 +56,10 @@ class ContactForm(models.Model):
     def save(self, *args, **kwargs):
         if self.retention_days is None:
             self.retention_days = ContactPluginSetting.load().default_retention_days
+        if not 1 <= self.retention_days <= 3650:
+            raise ValidationError(
+                {"retention_days": "保存日数は1〜3650日で指定してください。"}
+            )
         if self.is_active and (
             self.pk is None
             or not ContactField.objects.filter(form_id=self.pk).exists()
@@ -111,6 +126,17 @@ class ContactSubmission(models.Model):
     ip_hash = models.CharField("IPハッシュ", max_length=64)
     user_agent = models.CharField("User-Agent", max_length=200, blank=True)
     page_path = models.CharField("送信元ページ", max_length=500, blank=True)
+    notification_recipient = models.EmailField("通知先スナップショット", blank=True)
+    notification_subject = models.CharField(
+        "通知件名スナップショット", max_length=180, blank=True
+    )
+    notification_body = models.TextField("通知本文スナップショット", blank=True)
+    notification_reply_to = models.EmailField("Reply-Toスナップショット", blank=True)
+    autoreply_recipient = models.EmailField("自動返信先スナップショット", blank=True)
+    autoreply_subject = models.CharField(
+        "自動返信件名スナップショット", max_length=180, blank=True
+    )
+    autoreply_body = models.TextField("自動返信本文スナップショット", blank=True)
     submitted_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
@@ -156,7 +182,11 @@ class ContactPluginSetting(models.Model):
     rate_limit = models.PositiveSmallIntegerField("IP・フォーム別上限", default=5)
     rate_window_seconds = models.PositiveIntegerField("制限時間（秒）", default=600)
     minimum_fill_seconds = models.PositiveSmallIntegerField("最短入力時間", default=2)
-    default_retention_days = models.PositiveSmallIntegerField("既定保存日数", default=90)
+    default_retention_days = models.PositiveSmallIntegerField(
+        "既定保存日数",
+        default=90,
+        validators=[MinValueValidator(1), MaxValueValidator(3650)],
+    )
     mail_max_attempts = models.PositiveSmallIntegerField("メール最大試行回数", default=5)
     mail_retry_base_seconds = models.PositiveIntegerField("メール再試行基準秒", default=60)
     mail_lock_timeout_seconds = models.PositiveIntegerField("メールロック失効秒", default=900)
@@ -168,8 +198,21 @@ class ContactPluginSetting(models.Model):
     class Meta:
         verbose_name = "問い合わせフォーム設定"
         verbose_name_plural = "問い合わせフォーム設定"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    default_retention_days__gte=1,
+                    default_retention_days__lte=3650,
+                ),
+                name="contact_default_retention_days_range",
+            )
+        ]
 
     def clean(self):
+        if not 1 <= self.default_retention_days <= 3650:
+            raise ValidationError(
+                {"default_retention_days": "既定保存日数は1〜3650日で指定してください。"}
+            )
         if not 1 <= self.max_post_bytes <= 65_536:
             raise ValidationError({"max_post_bytes": "POST上限は1〜65536バイトです。"})
         if not 1 <= self.rate_limit <= 100:

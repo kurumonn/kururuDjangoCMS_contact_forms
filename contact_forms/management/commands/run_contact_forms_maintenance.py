@@ -19,6 +19,7 @@ class Command(BaseCommand):
         if options["interval_seconds"] < 60:
             raise CommandError("--interval-seconds must be at least 60")
         while True:
+            call_command("reconcile_contact_mail_outbox")
             call_command("purge_contact_submissions")
             if options["once"]:
                 return

@@ -4,7 +4,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Q
 from django.utils import timezone
 
-from contact_forms.models import ContactMaintenanceRun, MailDelivery
+from contact_forms.models import ContactMaintenanceRun, ContactSubmission, MailDelivery
 
 
 class Command(BaseCommand):
@@ -49,6 +49,17 @@ class Command(BaseCommand):
         ).count()
         if stale:
             issues.append(f"stale_deliveries={stale}")
+
+        missing = (
+            ContactSubmission.objects.filter(
+                status=ContactSubmission.Status.RECEIVED,
+                submitted_at__lt=outbox_cutoff,
+            )
+            .exclude(deliveries__kind=MailDelivery.Kind.NOTIFICATION)
+            .count()
+        )
+        if missing:
+            issues.append(f"missing_deliveries={missing}")
 
         latest_purge = ContactMaintenanceRun.objects.filter(
             kind=ContactMaintenanceRun.Kind.PURGE,

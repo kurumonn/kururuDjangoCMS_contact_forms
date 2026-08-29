@@ -39,6 +39,28 @@ def _submitter_email(submission):
 
 
 def enqueue_submission(submission: ContactSubmission, *, now=None):
+    if not submission.notification_recipient:
+        form = submission.form
+        submitter = _submitter_email(submission)
+        submission.notification_recipient = form.recipient_email
+        submission.notification_subject = form.subject
+        submission.notification_body = _plain_body(submission)
+        submission.notification_reply_to = submitter
+        if submitter and form.autoresponder_subject and form.autoresponder_body:
+            submission.autoreply_recipient = submitter
+            submission.autoreply_subject = form.autoresponder_subject
+            submission.autoreply_body = form.autoresponder_body
+        submission.save(
+            update_fields=[
+                "notification_recipient",
+                "notification_subject",
+                "notification_body",
+                "notification_reply_to",
+                "autoreply_recipient",
+                "autoreply_subject",
+                "autoreply_body",
+            ]
+        )
     return MailDelivery.objects.get_or_create(
         submission=submission,
         kind=MailDelivery.Kind.NOTIFICATION,
@@ -47,9 +69,11 @@ def enqueue_submission(submission: ContactSubmission, *, now=None):
 
 
 def _enqueue_autoreply(submission: ContactSubmission, *, now):
-    reply_to = _submitter_email(submission)
-    form = submission.form
-    if not reply_to or not form.autoresponder_subject or not form.autoresponder_body:
+    if (
+        not submission.autoreply_recipient
+        or not submission.autoreply_subject
+        or not submission.autoreply_body
+    ):
         return None
     return MailDelivery.objects.get_or_create(
         submission=submission,
@@ -60,24 +84,47 @@ def _enqueue_autoreply(submission: ContactSubmission, *, now):
 
 def _message_for(delivery: MailDelivery):
     submission = delivery.submission
-    form = submission.form
-    submitter = _submitter_email(submission)
     if delivery.kind == MailDelivery.Kind.NOTIFICATION:
         return EmailMessage(
-            subject=form.subject,
-            body=_plain_body(submission),
+            subject=submission.notification_subject,
+            body=submission.notification_body,
             from_email=settings.DEFAULT_FROM_EMAIL,
-            to=[form.recipient_email],
-            reply_to=[submitter] if submitter else None,
+            to=[submission.notification_recipient],
+            reply_to=(
+                [submission.notification_reply_to]
+                if submission.notification_reply_to
+                else None
+            ),
         )
-    if not submitter or not form.autoresponder_subject or not form.autoresponder_body:
+    if (
+        not submission.autoreply_recipient
+        or not submission.autoreply_subject
+        or not submission.autoreply_body
+    ):
         raise ValueError("autoresponse is not configured")
     return EmailMessage(
-        subject=form.autoresponder_subject,
-        body=form.autoresponder_body,
+        subject=submission.autoreply_subject,
+        body=submission.autoreply_body,
         from_email=settings.DEFAULT_FROM_EMAIL,
-        to=[submitter],
+        to=[submission.autoreply_recipient],
     )
+
+
+def reconcile_missing_deliveries(*, now=None) -> int:
+    """旧処理や中断で配送行がない受付済み問い合わせをOutboxへ戻す。"""
+    now = now or timezone.now()
+    missing = (
+        ContactSubmission.objects.filter(status=ContactSubmission.Status.RECEIVED)
+        .exclude(deliveries__kind=MailDelivery.Kind.NOTIFICATION)
+        .select_related("form")
+        .prefetch_related("form__fields")
+        .order_by("pk")
+    )
+    count = 0
+    for submission in missing.iterator(chunk_size=200):
+        enqueue_submission(submission, now=now)
+        count += 1
+    return count
 
 
 def claim_next_delivery(worker_id: str, *, now=None):

@@ -10,6 +10,7 @@ from django.core import mail
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.management import call_command, CommandError
 from django.forms.models import inlineformset_factory
+from django.db import IntegrityError, transaction
 from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -23,6 +24,7 @@ from contact_forms.admin import (
     ContactFieldInlineFormSet,
     ContactFormAdmin,
     ContactFormAdminForm,
+    ContactPluginSettingAdmin,
     ContactSubmissionAdmin,
 )
 from contact_forms.mailer import process_next_delivery
@@ -36,6 +38,7 @@ from contact_forms.models import (
 )
 from contact_forms.plugin import BLOCK_NAME, PLUGIN_KEY
 from contact_forms.services import ip_hash, make_render_token, safe_return_path
+from contact_forms.views import manage
 
 
 class KururuFormsTestCase(TestCase):
@@ -118,6 +121,26 @@ class SubmissionTests(KururuFormsTestCase):
         self.assertEqual(len(mail.outbox), 2)
         self.assertEqual(mail.outbox[0].from_email, "forms@example.test")
         self.assertEqual(mail.outbox[0].reply_to, ["reader@example.test"])
+
+    def test_pending_delivery_uses_submission_time_recipient_and_content(self):
+        self.client.post(self.url, self.payload())
+        submission = ContactSubmission.objects.get()
+        original_body = submission.notification_body
+
+        self.form.recipient_email = "changed@example.test"
+        self.form.subject = "変更後の件名"
+        self.form.autoresponder_body = "変更後の自動返信"
+        self.form.save()
+
+        self.drain_outbox()
+
+        self.assertEqual(mail.outbox[0].to, ["owner@example.test"])
+        self.assertEqual(mail.outbox[0].subject, "問い合わせ")
+        self.assertEqual(mail.outbox[0].body, original_body)
+        self.assertEqual(
+            mail.outbox[1].body,
+            "お問い合わせを受け付けました。",
+        )
 
     def test_mail_failure_does_not_lose_submission_or_store_exception_text(self):
         setting = ContactPluginSetting.load()
@@ -424,8 +447,77 @@ class FormAndPluginTests(KururuFormsTestCase):
             30,
         )
 
+    def test_default_retention_rejects_zero_and_values_above_limit(self):
+        setting = ContactPluginSetting.load()
+        for value in (0, 3651):
+            with self.subTest(value=value):
+                setting.default_retention_days = value
+                with self.assertRaises(ValidationError):
+                    setting.full_clean()
+
+    def test_blank_form_retention_cannot_copy_invalid_orm_value(self):
+        setting = ContactPluginSetting.load()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ContactPluginSetting.objects.filter(pk=setting.pk).update(
+                default_retention_days=0
+            )
+
+        setting.default_retention_days = 0
+        with patch.object(ContactPluginSetting, "load", return_value=setting):
+            with self.assertRaises(ValidationError):
+                ContactForm.objects.create(
+                    name="不正な保存期限",
+                    slug="invalid-retention",
+                    recipient_email="owner@example.test",
+                )
+
 
 class MaintenanceTests(KururuFormsTestCase):
+    def test_reconcile_restores_legacy_submission_without_delivery(self):
+        submission = ContactSubmission.objects.create(
+            form=self.form,
+            idempotency_key=uuid.uuid4(),
+            payload={
+                "name": "旧受付",
+                "email": "legacy@example.test",
+                "message": "復旧対象",
+            },
+            ip_hash="0" * 64,
+        )
+
+        call_command("reconcile_contact_mail_outbox")
+
+        delivery = MailDelivery.objects.get(submission=submission)
+        submission.refresh_from_db()
+        self.assertEqual(delivery.kind, MailDelivery.Kind.NOTIFICATION)
+        self.assertEqual(submission.notification_recipient, "owner@example.test")
+        self.assertEqual(submission.notification_reply_to, "legacy@example.test")
+
+    def test_purge_skips_submission_while_smtp_worker_holds_lease(self):
+        self.form.retention_days = 1
+        self.form.save(update_fields=["retention_days"])
+        submission = ContactSubmission.objects.create(
+            form=self.form,
+            idempotency_key=uuid.uuid4(),
+            payload={"name": "processing"},
+            ip_hash="0" * 64,
+        )
+        delivery = MailDelivery.objects.create(
+            submission=submission,
+            kind=MailDelivery.Kind.NOTIFICATION,
+            status=MailDelivery.Status.PROCESSING,
+            locked_at=timezone.now(),
+            locked_by="worker",
+        )
+        ContactSubmission.objects.filter(pk=submission.pk).update(
+            submitted_at=timezone.now() - timedelta(days=2)
+        )
+
+        call_command("purge_contact_submissions")
+
+        self.assertTrue(ContactSubmission.objects.filter(pk=submission.pk).exists())
+        self.assertTrue(MailDelivery.objects.filter(pk=delivery.pk).exists())
+
     def test_periodic_purge_records_audit_and_health_check_passes(self):
         self.form.retention_days = 1
         self.form.save(update_fields=["retention_days"])
@@ -504,6 +596,35 @@ class AdminTests(KururuFormsTestCase):
         request.user = user
         model_admin = ContactSubmissionAdmin(ContactSubmission, admin.site)
         self.assertFalse(model_admin.has_module_permission(request))
+
+    def test_missing_singleton_still_requires_add_permission(self):
+        ContactPluginSetting.objects.all().delete()
+        user = get_user_model().objects.create_user(
+            username="settings-viewer",
+            password="password",  # pragma: allowlist secret
+            is_staff=True,
+        )
+        request = RequestFactory().get("/admin/")
+        request.user = user
+        model_admin = ContactPluginSettingAdmin(ContactPluginSetting, admin.site)
+
+        self.assertFalse(model_admin.has_add_permission(request))
+
+    def test_plugin_management_link_requires_view_permission(self):
+        permitted = self.staff_with_permissions("manager", "view_contactform")
+        request = RequestFactory().get("/contact/manage/")
+        request.user = permitted
+        response = manage(request)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.url,
+            reverse("admin:contact_forms_contactform_changelist"),
+        )
+
+        denied = self.staff_with_permissions("no-form-access")
+        request.user = denied
+        with self.assertRaises(PermissionDenied):
+            manage(request)
 
     def test_duplicate_is_inactive_and_copies_fields(self):
         model_admin = ContactFormAdmin(ContactForm, admin.site)

@@ -6,6 +6,7 @@ import uuid
 from django.core.management.base import BaseCommand, CommandError
 
 from contact_forms.mailer import process_next_delivery
+from contact_forms.mailer import reconcile_missing_deliveries
 
 
 class Command(BaseCommand):
@@ -39,6 +40,7 @@ class Command(BaseCommand):
         worker_id = options["worker_id"] or (
             f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         )
+        reconcile_missing_deliveries()
         processed = 0
         while True:
             result = process_next_delivery(worker_id)
