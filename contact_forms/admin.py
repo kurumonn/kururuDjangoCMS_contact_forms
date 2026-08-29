@@ -203,7 +203,10 @@ class ContactSubmissionAdmin(admin.ModelAdmin):
     list_display = ("form", "status", "submitted_at")
     list_filter = ("form", "status")
     readonly_fields = (
-        "form", "payload", "status", "ip_hash", "user_agent", "page_path", "submitted_at"
+        "form", "payload", "status", "ip_hash", "user_agent", "page_path",
+        "notification_recipient", "notification_subject", "notification_body",
+        "notification_reply_to", "autoreply_recipient", "autoreply_subject",
+        "autoreply_body", "submitted_at"
     )
     date_hierarchy = "submitted_at"
 
@@ -269,7 +272,10 @@ class MailDeliveryAdmin(admin.ModelAdmin):
 @admin.register(ContactPluginSetting)
 class ContactPluginSettingAdmin(admin.ModelAdmin):
     def has_add_permission(self, request):
-        return not ContactPluginSetting.objects.exists()
+        return (
+            super().has_add_permission(request)
+            and not ContactPluginSetting.objects.exists()
+        )
 
     def has_delete_permission(self, request, obj=None):
         return False

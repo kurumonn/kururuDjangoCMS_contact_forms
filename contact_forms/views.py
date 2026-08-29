@@ -1,10 +1,12 @@
 from functools import wraps
 
 from django.contrib import messages
+from django.contrib.admin.views.decorators import staff_member_required
 from django.core import signing
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.http import HttpResponseBadRequest, HttpResponseRedirect
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, redirect
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_POST
 
@@ -16,6 +18,14 @@ from .mailer import enqueue_submission
 from .models import ContactForm, ContactPluginSetting, ContactSubmission
 from .plugin import PLUGIN_KEY
 from .services import ip_hash, load_render_token
+
+
+@staff_member_required
+def manage(request):
+    """CMSプラグイン一覧から、権限確認後にDjango管理画面へ案内する。"""
+    if not request.user.has_perm("contact_forms.view_contactform"):
+        raise PermissionDenied
+    return redirect("admin:contact_forms_contactform_changelist")
 
 
 def post_size_limit(view):

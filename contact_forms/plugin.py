@@ -67,6 +67,7 @@ definition = PluginDefinition(
     description="DB先行保存とスパム対策を備えた問い合わせフォーム",
     urlconf="contact_forms.urls",
     url_prefix="contact",
+    management_url_name="manage",
     blocks=(
         PluginBlock(
             name=BLOCK_NAME,
