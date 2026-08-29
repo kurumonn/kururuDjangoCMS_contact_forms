@@ -37,12 +37,16 @@ def main() -> int:
     findings = report.get("results", {})
     if findings:
         print("Potential secrets found in:")
-        for path in sorted(findings):
+        for path, candidates in sorted(findings.items()):
             print(f"- {path}")
-            print(
-                f"::error file={path},title=detect-secrets candidate::"
-                "Potential secret candidate; inspect locally."
-            )
+            for candidate in candidates:
+                detector = candidate.get("type", "unknown detector")
+                line = candidate.get("line_number", 1)
+                print(
+                    f"::error file={path},line={line},"
+                    f"title=detect-secrets {detector}::"
+                    "Potential secret candidate; inspect locally."
+                )
         return 1
     print("detect-secrets: no candidates")
     return 0
