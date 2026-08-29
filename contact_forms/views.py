@@ -78,14 +78,18 @@ def submit(request, slug):
         return HttpResponseRedirect(token_data["return_path"])
 
     with transaction.atomic():
-        submission = ContactSubmission.objects.create(
-            form=contact_form,
-            payload=serializable_payload(submitted),
-            ip_hash=hashed_ip,
-            user_agent=request.META.get("HTTP_USER_AGENT", "")[:200],
-            page_path=token_data["return_path"],
+        submission, created = ContactSubmission.objects.get_or_create(
+            idempotency_key=token_data["idempotency_key"],
+            defaults={
+                "form": contact_form,
+                "payload": serializable_payload(submitted),
+                "ip_hash": hashed_ip,
+                "user_agent": request.META.get("HTTP_USER_AGENT", "")[:200],
+                "page_path": token_data["return_path"],
+            },
         )
 
-    deliver_submission(submission)
+    if created:
+        deliver_submission(submission)
     messages.success(request, contact_form.success_message)
     return HttpResponseRedirect(token_data["return_path"])

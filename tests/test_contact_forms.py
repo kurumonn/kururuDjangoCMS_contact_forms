@@ -141,6 +141,18 @@ class SubmissionTests(KururuFormsTestCase):
         self.assertEqual(second.status_code, 400)
         self.assertEqual(other.status_code, 302)
 
+    def test_replayed_render_token_creates_one_submission_and_one_delivery_set(self):
+        payload = self.payload()
+
+        first = self.client.post(self.url, payload, REMOTE_ADDR="198.51.100.20")
+        second = self.client.post(self.url, payload, REMOTE_ADDR="198.51.100.20")
+
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(second.status_code, 302)
+        self.assertEqual(ContactSubmission.objects.count(), 1)
+        self.assertEqual(MailDelivery.objects.count(), 2)
+        self.assertEqual(len(mail.outbox), 2)
+
 
 class FormAndPluginTests(KururuFormsTestCase):
     def test_server_side_field_validation_and_normalization(self):

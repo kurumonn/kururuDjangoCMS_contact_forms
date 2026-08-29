@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import os
 import time
+import uuid
 from urllib.parse import urlsplit
 
 from django.conf import settings
@@ -36,6 +37,7 @@ def make_render_token(form_id: int, return_path: str) -> str:
     return signing.dumps(
         {
             "form_id": form_id,
+            "idempotency_key": str(uuid.uuid4()),
             "return_path": safe_return_path(return_path),
             "shown_at": int(time.time()),
         },
@@ -50,5 +52,9 @@ def load_render_token(token: str, form_id: int, minimum_fill_seconds: int):
         raise signing.BadSignature("form mismatch")
     if int(time.time()) - int(data.get("shown_at", 0)) < minimum_fill_seconds:
         raise signing.BadSignature("submitted too quickly")
+    try:
+        data["idempotency_key"] = str(uuid.UUID(str(data.get("idempotency_key", ""))))
+    except (TypeError, ValueError, AttributeError):
+        raise signing.BadSignature("invalid idempotency key")
     data["return_path"] = safe_return_path(data.get("return_path", "/"))
     return data

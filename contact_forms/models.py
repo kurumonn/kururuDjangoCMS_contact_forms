@@ -88,6 +88,7 @@ class ContactSubmission(models.Model):
         MAIL_FAILED = "mail_failed", "メール失敗"
 
     form = models.ForeignKey(ContactForm, related_name="submissions", on_delete=models.PROTECT)
+    idempotency_key = models.UUIDField("冪等キー", unique=True, editable=False)
     payload = models.JSONField("送信内容")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.RECEIVED)
     ip_hash = models.CharField("IPハッシュ", max_length=64)
