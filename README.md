@@ -24,8 +24,8 @@ Kururu Formsは、KururuCMS向けの再利用可能なDjango問い合わせフ�
 
 ## 対応するCMS
 
-KururuCMS側にcms_plugins API v1が必要です。修正検証ではDjangoCMSの
-integration/plugin-platform-20260830ブランチと組み合わせます。
+KururuCMS側にcms_plugins API v1が必要です。0.2.1のCIと修正検証では、
+CMSコミット`84537995a87c474a6186e9ba1000b33562544fbe`へ固定しています。
 
 ## 開発環境への導入
 
@@ -50,14 +50,14 @@ kururucms.plugins entry point名です。ここに無いパッケージは、環
 実行中コンテナでpipを実行せず、wheelを作ってイメージへ固定します。
 
     python -m build --wheel
-    python -m pip hash dist\kururucms_contact_forms-0.2.0-py3-none-any.whl
+    python -m pip hash dist\kururucms_contact_forms-0.2.1-py3-none-any.whl
 
 生成したwheelをCMSのplugin_wheels/に置き、CMS側の
 plugin-requirements.lockへ、表示されたSHA-256を付けて追記します。
 CMS本体にない追加依存を使う場合は、その推移的依存もすべて版とhashを固定した
 独立行として同じlockへ記録します。
 
-    kururucms-contact-forms==0.2.0 --hash=sha256:<pip hashの値>
+    kururucms-contact-forms==0.2.1 --hash=sha256:<pip hashの値>
 
 イメージを再ビルドし、次の環境変数をsecret管理下で設定します。
 
@@ -81,6 +81,8 @@ HTTPの送信処理はSMTPへ接続しません。問い合わせと管理者通
 
 管理者通知が成功した後にだけ自動返信Outboxを作ります。
 管理者通知が最大試行回数まで失敗した場合、自動返信は既定では送信しません。
+宛先、件名、本文、Reply-Toは受付時に問い合わせ行へスナップショットします。
+送信待ちの間にフォーム設定を変更しても、既に受け付けたメールの配送内容は変わりません。
 
 ## 保存期限と監視
 
@@ -99,6 +101,10 @@ HTTPの送信処理はSMTPへ接続しません。問い合わせと管理者通
 失敗した1件だけを送信待ちへ戻します。
 
     python manage.py retry_contact_mail_delivery <delivery_id>
+
+DB保存直後にプロセスが停止し、配送行だけが作られなかった旧状態は次で再構築できます。
+
+    python manage.py reconcile_contact_mail_outbox
 
 削除処理の失敗は原因を解消してから手動実行できます。成功すれば新しい監査記録が残ります。
 

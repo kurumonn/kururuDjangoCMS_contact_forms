@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: kurumonn/kururuDjangoCMS
-          ref: integration/plugin-platform-20260830
+          ref: 84537995a87c474a6186e9ba1000b33562544fbe  # pragma: allowlist secret
           path: cms
 
       - name: Set up Python
@@ -77,5 +77,5 @@ jobs:
         run: |
           python -m venv /tmp/kururu-wheel-verify
           /tmp/kururu-wheel-verify/bin/python -m pip install --upgrade pip==25.3
-          /tmp/kururu-wheel-verify/bin/python -m pip install dist/kururucms_contact_forms-0.2.0-py3-none-any.whl
+          /tmp/kururu-wheel-verify/bin/python -m pip install dist/kururucms_contact_forms-0.2.1-py3-none-any.whl
           /tmp/kururu-wheel-verify/bin/python scripts/verify_wheel.py

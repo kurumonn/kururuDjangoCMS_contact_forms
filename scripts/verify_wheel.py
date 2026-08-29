@@ -17,7 +17,7 @@ matches[0].load()
 
 package_root = Path(contact_forms.__file__).resolve().parent
 required = [
-    package_root / "migrations" / "0004_form_constraints_and_maintenance.py",
+    package_root / "migrations" / "0005_delivery_snapshots_retention_constraints.py",
     package_root
     / "management"
     / "commands"
