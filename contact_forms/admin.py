@@ -1,11 +1,13 @@
 from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
+from django.forms.models import BaseInlineFormSet
 from django.utils.text import slugify
 
 from .models import (
     ContactField,
     ContactForm,
+    ContactMaintenanceRun,
     ContactPluginSetting,
     ContactSubmission,
     MailDelivery,
@@ -55,9 +57,38 @@ class ContactFormAdminForm(forms.ModelForm):
         model = ContactForm
         fields = "__all__"
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.is_bound and self.instance.pk is None:
+            self.fields["retention_days"].initial = (
+                ContactPluginSetting.load().default_retention_days
+            )
+
+    def clean(self):
+        cleaned_data = super().clean()
+        self.instance._kururu_selected_preset = cleaned_data.get("preset") or "standard"
+        return cleaned_data
+
+
+class ContactFieldInlineFormSet(BaseInlineFormSet):
+    def clean(self):
+        super().clean()
+        if any(self.errors) or not self.instance.is_active:
+            return
+        remaining = sum(
+            1
+            for form in self.forms
+            if form.cleaned_data and not form.cleaned_data.get("DELETE", False)
+        )
+        preset = getattr(self.instance, "_kururu_selected_preset", "")
+        preset_will_populate = self.instance.pk is None and bool(PRESETS.get(preset))
+        if remaining == 0 and not preset_will_populate:
+            raise forms.ValidationError("有効化するフォームには1項目以上が必要です。")
+
 
 class ContactFieldInline(admin.TabularInline):
     model = ContactField
+    formset = ContactFieldInlineFormSet
     extra = 0
     ordering = ("order",)
 
@@ -79,6 +110,11 @@ class ContactFormAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         obj._kururu_created_now = not change
+        obj._kururu_requested_active = bool(obj.is_active)
+        if obj._kururu_requested_active and (
+            obj.pk is None or not obj.fields.exists()
+        ):
+            obj.is_active = False
         super().save_model(request, obj, form, change)
 
     def save_related(self, request, form, formsets, change):
@@ -99,6 +135,13 @@ class ContactFormAdmin(admin.ModelAdmin):
                     max_length=5000 if kind == ContactField.Kind.TEXTAREA else 200,
                     order=order,
                 )
+        if getattr(obj, "_kururu_requested_active", False) and not obj.is_active:
+            if not obj.fields.exists():
+                raise forms.ValidationError(
+                    "有効化するフォームには1項目以上が必要です。"
+                )
+            obj.is_active = True
+            obj.save(update_fields=["is_active"])
 
     @admin.action(description="選択したフォームを複製", permissions=["duplicate"])
     def duplicate_forms(self, request, queryset):
@@ -192,8 +235,26 @@ class ContactSubmissionAdmin(admin.ModelAdmin):
 
 @admin.register(MailDelivery)
 class MailDeliveryAdmin(admin.ModelAdmin):
-    list_display = ("submission", "kind", "status", "attempts", "sent_at")
-    readonly_fields = ("submission", "kind", "status", "attempts", "last_error", "sent_at")
+    list_display = (
+        "submission",
+        "kind",
+        "status",
+        "attempts",
+        "available_at",
+        "sent_at",
+    )
+    readonly_fields = (
+        "submission",
+        "kind",
+        "status",
+        "attempts",
+        "last_error",
+        "available_at",
+        "locked_at",
+        "locked_by",
+        "last_attempt_at",
+        "sent_at",
+    )
 
     def has_add_permission(self, request):
         return False
@@ -209,6 +270,35 @@ class MailDeliveryAdmin(admin.ModelAdmin):
 class ContactPluginSettingAdmin(admin.ModelAdmin):
     def has_add_permission(self, request):
         return not ContactPluginSetting.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ContactMaintenanceRun)
+class ContactMaintenanceRunAdmin(admin.ModelAdmin):
+    list_display = (
+        "kind",
+        "status",
+        "started_at",
+        "finished_at",
+        "deleted_count",
+        "error_type",
+    )
+    readonly_fields = (
+        "kind",
+        "status",
+        "started_at",
+        "finished_at",
+        "deleted_count",
+        "error_type",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
     def has_delete_permission(self, request, obj=None):
         return False

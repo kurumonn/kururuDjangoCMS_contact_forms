@@ -18,7 +18,11 @@ class ContactForm(models.Model):
     autoresponder_body = models.TextField("自動返信本文", blank=True)
     success_message = models.CharField("成功メッセージ", max_length=300, default="お問い合わせを受け付けました。")
     error_message = models.CharField("失敗メッセージ", max_length=300, default="送信できませんでした。入力内容をご確認ください。")
-    retention_days = models.PositiveSmallIntegerField("保存日数", default=90)
+    retention_days = models.PositiveSmallIntegerField(
+        "保存日数",
+        blank=True,
+        null=True,
+    )
     is_active = models.BooleanField("有効", default=False)
     is_archived = models.BooleanField("アーカイブ", default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -33,10 +37,22 @@ class ContactForm(models.Model):
         return self.name
 
     def clean(self):
-        if not 1 <= self.retention_days <= 3650:
+        if self.retention_days is not None and not 1 <= self.retention_days <= 3650:
             raise ValidationError({"retention_days": "保存日数は1〜3650日で指定してください。"})
         if self.is_active and self.is_archived:
             raise ValidationError("アーカイブ済みフォームは有効化できません。")
+
+    def save(self, *args, **kwargs):
+        if self.retention_days is None:
+            self.retention_days = ContactPluginSetting.load().default_retention_days
+        if self.is_active and (
+            self.pk is None
+            or not ContactField.objects.filter(form_id=self.pk).exists()
+        ):
+            raise ValidationError(
+                {"is_active": "有効化するフォームには1項目以上が必要です。"}
+            )
+        return super().save(*args, **kwargs)
 
 
 class ContactField(models.Model):
@@ -170,3 +186,29 @@ class ContactPluginSetting(models.Model):
     @classmethod
     def load(cls):
         return cls.objects.get_or_create(pk=1)[0]
+
+
+class ContactMaintenanceRun(models.Model):
+    class Kind(models.TextChoices):
+        PURGE = "purge", "保存期限削除"
+
+    class Status(models.TextChoices):
+        RUNNING = "running", "実行中"
+        SUCCEEDED = "succeeded", "成功"
+        FAILED = "failed", "失敗"
+
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.RUNNING,
+    )
+    started_at = models.DateTimeField(default=timezone.now, db_index=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    deleted_count = models.PositiveIntegerField(default=0)
+    error_type = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ("-started_at",)
+        verbose_name = "問い合わせ保守実行"
+        verbose_name_plural = "問い合わせ保守実行"

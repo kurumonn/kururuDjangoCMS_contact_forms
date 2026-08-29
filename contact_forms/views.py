@@ -38,7 +38,9 @@ def post_size_limit(view):
 @require_plugin_enabled(PLUGIN_KEY)
 def submit(request, slug):
     contact_form = get_object_or_404(
-        ContactForm.objects.prefetch_related("fields"),
+        ContactForm.objects.filter(fields__isnull=False)
+        .distinct()
+        .prefetch_related("fields"),
         slug=slug,
         is_active=True,
         is_archived=False,

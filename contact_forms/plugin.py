@@ -15,7 +15,13 @@ BLOCK_NAME = "kururu_forms.contact_form"
 def form_choices():
     return [
         {"value": item.pk, "label": item.name}
-        for item in ContactForm.objects.filter(is_active=True, is_archived=False).order_by("name")
+        for item in ContactForm.objects.filter(
+            is_active=True,
+            is_archived=False,
+            fields__isnull=False,
+        )
+        .distinct()
+        .order_by("name")
     ]
 
 
@@ -34,8 +40,12 @@ def block_context(request, data):
         return {"contact_form": None}
     contact_form = (
         ContactForm.objects.filter(
-            pk=data.get("form_id"), is_active=True, is_archived=False
+            pk=data.get("form_id"),
+            is_active=True,
+            is_archived=False,
+            fields__isnull=False,
         )
+        .distinct()
         .prefetch_related("fields")
         .first()
     )
