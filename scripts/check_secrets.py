@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
 
 def main() -> int:
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        capture_output=True,
+        check=True,
+    ).stdout.split(b"\0")
+    tracked_files = [os.fsdecode(path) for path in tracked if path]
     completed = subprocess.run(
         [
             sys.executable,
             "-m",
             "detect_secrets",
             "scan",
-            "--all-files",
-            "--exclude-files",
-            r"(^|/)(cms|\.git|build|dist|.*\.egg-info)/",
+            *tracked_files,
         ],
         capture_output=True,
         text=True,
