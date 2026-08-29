@@ -28,6 +28,8 @@ def main() -> int:
         check=False,
     )
     if completed.returncode:
+        detail = (completed.stderr or "detect-secrets subprocess failed").splitlines()[0]
+        print(f"::error title=detect-secrets execution::{detail}")
         print(completed.stderr, file=sys.stderr)
         return completed.returncode
 
@@ -37,6 +39,10 @@ def main() -> int:
         print("Potential secrets found in:")
         for path in sorted(findings):
             print(f"- {path}")
+            print(
+                f"::error file={path},title=detect-secrets candidate::"
+                "Potential secret candidate; inspect locally."
+            )
         return 1
     print("detect-secrets: no candidates")
     return 0
