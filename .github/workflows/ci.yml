@@ -68,7 +68,7 @@ jobs:
           pip-audit --vulnerability-service osv --requirement requirements-audit.txt
 
       - name: Check committed files for secrets
-        run: detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+        run: python scripts/check_secrets.py
 
       - name: Build wheel
         run: python -m build --wheel
