@@ -482,7 +482,7 @@ class AdminTests(KururuFormsTestCase):
         user = get_user_model().objects.create_user(
             username=username,
             email=f"{username}@example.test",
-            password="password",
+            password="password",  # pragma: allowlist secret
             is_staff=True,
         )
         user.user_permissions.add(
@@ -495,7 +495,9 @@ class AdminTests(KururuFormsTestCase):
 
     def test_submission_content_requires_dedicated_permission(self):
         user = get_user_model().objects.create_user(
-            username="staff", email="staff@example.test", password="password",
+            username="staff",
+            email="staff@example.test",
+            password="password",  # pragma: allowlist secret
             is_staff=True,
         )
         request = RequestFactory().get("/admin/")
