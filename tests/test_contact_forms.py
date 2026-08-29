@@ -217,6 +217,36 @@ class SubmissionTests(KururuFormsTestCase):
         self.assertEqual(delivery.attempts, 2)
         self.assertEqual(len(mail.outbox), 1)
 
+    def test_repeated_worker_crashes_stop_at_the_attempt_cap(self):
+        setting = ContactPluginSetting.load()
+        setting.mail_max_attempts = 1
+        setting.save(update_fields=["mail_max_attempts"])
+        self.client.post(self.url, self.payload())
+        delivery = MailDelivery.objects.get()
+        now = timezone.now()
+        delivery.status = MailDelivery.Status.PROCESSING
+        delivery.attempts = 1
+        delivery.locked_at = now - timedelta(seconds=901)
+        delivery.locked_by = "crashed-worker"
+        delivery.save(
+            update_fields=["status", "attempts", "locked_at", "locked_by"]
+        )
+
+        with patch("contact_forms.mailer.EmailMessage.send") as send:
+            self.assertIsNone(process_next_delivery("replacement-worker", now=now))
+
+        send.assert_not_called()
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, MailDelivery.Status.FAILED)
+        self.assertEqual(delivery.last_error, "WorkerLeaseExpired")
+        self.assertEqual(
+            ContactSubmission.objects.get().status,
+            ContactSubmission.Status.MAIL_FAILED,
+        )
+        self.assertFalse(
+            MailDelivery.objects.filter(kind=MailDelivery.Kind.AUTOREPLY).exists()
+        )
+
     def test_management_command_processes_outbox_without_web_request(self):
         self.client.post(self.url, self.payload())
         self.assertEqual(len(mail.outbox), 0)

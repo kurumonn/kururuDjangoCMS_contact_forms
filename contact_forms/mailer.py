@@ -99,28 +99,59 @@ def claim_next_delivery(worker_id: str, *, now=None):
         )
     ).order_by("available_at", "pk")
 
-    with transaction.atomic():
-        lock_options = {}
-        if connection.features.has_select_for_update_skip_locked:
-            lock_options["skip_locked"] = True
-        delivery = candidates.select_for_update(**lock_options).first()
-        if delivery is None:
-            return None
-        delivery.status = MailDelivery.Status.PROCESSING
-        delivery.attempts += 1
-        delivery.locked_at = now
-        delivery.locked_by = worker_id
-        delivery.last_attempt_at = now
-        delivery.save(
-            update_fields=[
-                "status",
-                "attempts",
-                "locked_at",
-                "locked_by",
-                "last_attempt_at",
-            ]
-        )
-        return delivery.pk
+    while True:
+        with transaction.atomic():
+            lock_options = {}
+            if connection.features.has_select_for_update_skip_locked:
+                lock_options["skip_locked"] = True
+            delivery = (
+                candidates.select_for_update(**lock_options)
+                .select_related("submission__form")
+                .first()
+            )
+            if delivery is None:
+                return None
+
+            # A worker can die after claiming a job but before SMTP starts. Such
+            # lease expirations still count toward the configured attempt cap;
+            # otherwise repeated process crashes could reclaim the same row
+            # forever without ever reaching _record_failure().
+            if delivery.attempts >= plugin_setting.mail_max_attempts:
+                delivery.status = MailDelivery.Status.FAILED
+                delivery.last_error = "WorkerLeaseExpired"
+                delivery.locked_at = None
+                delivery.locked_by = ""
+                delivery.save(
+                    update_fields=[
+                        "status",
+                        "last_error",
+                        "locked_at",
+                        "locked_by",
+                    ]
+                )
+                if delivery.kind == MailDelivery.Kind.NOTIFICATION:
+                    submission = delivery.submission
+                    submission.status = ContactSubmission.Status.MAIL_FAILED
+                    submission.save(update_fields=["status"])
+                    if plugin_setting.autorespond_after_notification_failure:
+                        _enqueue_autoreply(submission, now=now)
+                continue
+
+            delivery.status = MailDelivery.Status.PROCESSING
+            delivery.attempts += 1
+            delivery.locked_at = now
+            delivery.locked_by = worker_id
+            delivery.last_attempt_at = now
+            delivery.save(
+                update_fields=[
+                    "status",
+                    "attempts",
+                    "locked_at",
+                    "locked_by",
+                    "last_attempt_at",
+                ]
+            )
+            return delivery.pk
 
 
 def _record_success(delivery_id: int, worker_id: str, *, now):
