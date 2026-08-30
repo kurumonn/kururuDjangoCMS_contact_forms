@@ -26,10 +26,11 @@ minimal reproduction using synthetic data.
 - Viewing inquiry payloads requires the dedicated
   `contact_forms.view_contact_content` permission.
 - SMTP is executed only by the Outbox worker, never by the public HTTP request.
-- Email delivery is at-least-once. SMTP does not provide an atomic
-  send-and-acknowledge operation, so an operating-system failure after SMTP
-  acceptance but before the database acknowledgement may cause a duplicate
-  email. Duplicate HTTP submissions remain database-idempotent.
+- SMTP does not provide an atomic send-and-acknowledge operation. A lease that
+  expires while a worker is processing is quarantined as `unknown` and is not
+  resent automatically. Operators must correlate the stable Message-ID with
+  provider logs, then mark it sent or explicitly confirm the duplicate risk
+  before retrying. Duplicate HTTP submissions remain database-idempotent.
 - The maintenance process and `check_contact_forms_health` are required
   production components, not optional examples.
 

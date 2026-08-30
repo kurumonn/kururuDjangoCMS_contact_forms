@@ -14,7 +14,7 @@ Kururu Formsは、KururuCMS向けの再利用可能なDjango問い合わせフ�
 - 記事ブロックのプルダウンからフォームを選択
 - DBへ問い合わせとOutboxを同一トランザクションで保存
 - 独立ワーカーによる指数バックオフ付きメール配送
-- ワーカー停止後のロック回収、最大試行、失敗配送の手動再開
+- 明示的SMTP失敗の指数再試行と、結果不明配送の自動再送禁止・手動解決
 - CSRF、署名付き表示時刻、ハニーポット、64KiB上限
 - IP・フォーム単位のレート制限、HMAC-SHA256によるIPハッシュ
 - 問い合わせ本文の専用閲覧権限、フォームごとの保存期限削除
@@ -24,8 +24,8 @@ Kururu Formsは、KururuCMS向けの再利用可能なDjango問い合わせフ�
 
 ## 対応するCMS
 
-KururuCMS側にcms_plugins API v1が必要です。0.2.1のCIと修正検証では、
-CMSコミット`84537995a87c474a6186e9ba1000b33562544fbe`へ固定しています。
+KururuCMS側にcms_plugins API v1が必要です。0.2.2のCIと修正検証では、
+CMSコミット`4aa9c87c30a3adea65e66cfad83f96b79e521e61`へ固定しています。
 
 ## 開発環境への導入
 
@@ -50,14 +50,14 @@ kururucms.plugins entry point名です。ここに無いパッケージは、環
 実行中コンテナでpipを実行せず、wheelを作ってイメージへ固定します。
 
     python -m build --wheel
-    python -m pip hash dist\kururucms_contact_forms-0.2.1-py3-none-any.whl
+    python -m pip hash dist\kururucms_contact_forms-0.2.2-py3-none-any.whl
 
 生成したwheelをCMSのplugin_wheels/に置き、CMS側の
 plugin-requirements.lockへ、表示されたSHA-256を付けて追記します。
 CMS本体にない追加依存を使う場合は、その推移的依存もすべて版とhashを固定した
 独立行として同じlockへ記録します。
 
-    kururucms-contact-forms==0.2.1 --hash=sha256:<pip hashの値>
+    kururucms-contact-forms==0.2.2 --hash=sha256:<pip hashの値>
 
 イメージを再ビルドし、次の環境変数をsecret管理下で設定します。
 
@@ -91,7 +91,7 @@ HTTPの送信処理はSMTPへ接続しません。問い合わせと管理者通
 
     python manage.py run_contact_forms_maintenance --interval-seconds 86400
 
-監視では次のコマンドを実行します。失敗配送、30分以上滞留したOutbox、
+監視では次のコマンドを実行します。失敗・結果不明配送、30分以上滞留したOutbox、
 36時間以内に成功した削除実行がない場合は終了コード1になります。
 
     python manage.py check_contact_forms_health
@@ -111,8 +111,14 @@ DB保存直後にプロセスが停止し、配送行だけが作られなかっ
     python manage.py purge_contact_submissions
 
 SMTPには「送信」とDBの「送信済み更新」を同一トランザクションにする仕組みがありません。
-そのため、SMTPが受理した直後かつDB更新前にOSごと停止した場合はメールが重複する可能性が
-あります。HTTPの重複POSTは署名トークン内のUUIDとDB一意制約で1件へ収束します。
+そのため、SMTPが受理した直後かつDB更新前にOSごと停止した配送は`unknown`へ隔離し、
+自動再送しません。配送事業者のログと固定Message-IDを照合し、受理済みなら送信済み確定、
+未受理と判断して再送する場合だけ重複リスクを明示確認します。
+
+    python manage.py resolve_contact_mail_delivery <delivery_id> --action mark-sent
+    python manage.py resolve_contact_mail_delivery <delivery_id> --action retry --confirm-duplicate-risk
+
+HTTPの重複POSTは署名トークン内のUUIDとDB一意制約で1件へ収束します。
 
 ## Python/Django実装の要点
 
@@ -124,7 +130,8 @@ PluginDefinitionを登録し、URLと記事ブロックをCMSへ通知します�
 フォーム項目はContactFieldからDjango Formをサーバー側で動的生成します。
 ブラウザの入力制約だけに依存せず、型、必須、選択肢、文字数をPOST時に再検証します。
 送信内容と管理者通知MailDeliveryは同一DBトランザクションで保存します。
-ワーカーは送信可能時刻とロック失効を確認し、失敗時は指数バックオフで再試行します。
+ワーカーは送信可能時刻を確認し、明示的なSMTP例外だけを指数バックオフで再試行します。
+失効した処理中leaseは配送結果不明として隔離し、運用者の判断なしには再送しません。
 SMTP例外には宛先が含まれることがあるため、保存するエラーは例外クラス名だけです。
 
 ## テスト
