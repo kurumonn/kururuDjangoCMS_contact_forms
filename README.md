@@ -25,7 +25,7 @@ Kururu Formsは、KururuCMS向けの再利用可能なDjango問い合わせフ�
 ## 対応するCMS
 
 KururuCMS側にcms_plugins API v1が必要です。0.2.2のCIと修正検証では、
-CMSコミット`7693319869c6c4bd2268b7cea1941498fc919ba4`へ固定しています。
+CMSコミット`807edde9c8dd5152a74e487d3237637eaeeb41a4`へ固定しています。
 
 ## 開発環境への導入
 
