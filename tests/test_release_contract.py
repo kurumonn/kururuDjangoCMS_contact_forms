@@ -4,7 +4,7 @@ from django.test import SimpleTestCase
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CMS_SHA = "4aa9c87c30a3adea65e66cfad83f96b79e521e61"
+CMS_SHA = "4aa9c87c30a3adea65e66cfad83f96b79e521e61"  # pragma: allowlist secret
 
 
 class ReleaseContractTests(SimpleTestCase):
