@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from email.utils import parseaddr
+import re
 
 from django.conf import settings
 from django.core.mail import EmailMessage
@@ -16,6 +18,7 @@ from .models import (
 )
 
 MAX_BACKOFF_SECONDS = 86_400
+MESSAGE_ID_DOMAIN = re.compile(r"^[A-Za-z0-9.-]+$")
 
 
 def _plain_body(submission):
@@ -84,6 +87,13 @@ def _enqueue_autoreply(submission: ContactSubmission, *, now):
 
 def _message_for(delivery: MailDelivery):
     submission = delivery.submission
+    from_address = parseaddr(settings.DEFAULT_FROM_EMAIL)[1]
+    domain = from_address.rpartition("@")[2].lower()
+    if not domain or not MESSAGE_ID_DOMAIN.fullmatch(domain):
+        domain = "localhost"
+    headers = {
+        "Message-ID": f"<kururu-forms-{delivery.message_id.hex}@{domain}>",
+    }
     if delivery.kind == MailDelivery.Kind.NOTIFICATION:
         return EmailMessage(
             subject=submission.notification_subject,
@@ -95,6 +105,7 @@ def _message_for(delivery: MailDelivery):
                 if submission.notification_reply_to
                 else None
             ),
+            headers=headers,
         )
     if (
         not submission.autoreply_recipient
@@ -107,6 +118,7 @@ def _message_for(delivery: MailDelivery):
         body=submission.autoreply_body,
         from_email=settings.DEFAULT_FROM_EMAIL,
         to=[submission.autoreply_recipient],
+        headers=headers,
     )
 
 
@@ -127,23 +139,63 @@ def reconcile_missing_deliveries(*, now=None) -> int:
     return count
 
 
+def quarantine_stale_deliveries(*, now=None) -> int:
+    """結果を確定できない期限切れleaseを、自動再送せず隔離する。"""
+    now = now or timezone.now()
+    plugin_setting = ContactPluginSetting.load()
+    stale_before = now - timedelta(seconds=plugin_setting.mail_lock_timeout_seconds)
+    count = 0
+    while True:
+        with transaction.atomic():
+            lock_options = {}
+            if connection.features.has_select_for_update_skip_locked:
+                lock_options["skip_locked"] = True
+            delivery = (
+                MailDelivery.objects.select_for_update(**lock_options)
+                .select_related("submission")
+                .filter(
+                    Q(
+                        status=MailDelivery.Status.PROCESSING,
+                        locked_at__lte=stale_before,
+                    )
+                    | Q(
+                        status=MailDelivery.Status.PROCESSING,
+                        locked_at__isnull=True,
+                    )
+                )
+                .order_by("pk")
+                .first()
+            )
+            if delivery is None:
+                return count
+            delivery.status = MailDelivery.Status.UNKNOWN
+            delivery.last_error = "DeliveryOutcomeUnknown"
+            delivery.locked_at = None
+            delivery.locked_by = ""
+            delivery.save(
+                update_fields=[
+                    "status",
+                    "last_error",
+                    "locked_at",
+                    "locked_by",
+                ]
+            )
+            if delivery.kind == MailDelivery.Kind.NOTIFICATION:
+                delivery.submission.status = ContactSubmission.Status.MAIL_FAILED
+                delivery.submission.save(update_fields=["status"])
+            count += 1
+
+
 def claim_next_delivery(worker_id: str, *, now=None):
     worker_id = (worker_id or "").strip()[:100]
     if not worker_id:
         raise ValueError("worker_id is required")
     now = now or timezone.now()
+    quarantine_stale_deliveries(now=now)
     plugin_setting = ContactPluginSetting.load()
-    stale_before = now - timedelta(seconds=plugin_setting.mail_lock_timeout_seconds)
     candidates = MailDelivery.objects.filter(
-        Q(status=MailDelivery.Status.PENDING, available_at__lte=now)
-        | Q(
-            status=MailDelivery.Status.PROCESSING,
-            locked_at__lte=stale_before,
-        )
-        | Q(
-            status=MailDelivery.Status.PROCESSING,
-            locked_at__isnull=True,
-        )
+        status=MailDelivery.Status.PENDING,
+        available_at__lte=now,
     ).order_by("available_at", "pk")
 
     while True:

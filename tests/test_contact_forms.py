@@ -27,7 +27,7 @@ from contact_forms.admin import (
     ContactPluginSettingAdmin,
     ContactSubmissionAdmin,
 )
-from contact_forms.mailer import process_next_delivery
+from contact_forms.mailer import _message_for, process_next_delivery
 from contact_forms.models import (
     ContactField,
     ContactForm,
@@ -221,7 +221,20 @@ class SubmissionTests(KururuFormsTestCase):
         self.assertEqual(MailDelivery.objects.count(), 2)
         self.assertEqual(len(mail.outbox), 2)
 
-    def test_stale_processing_delivery_is_reclaimed_after_worker_stops(self):
+    def test_delivery_uses_stable_message_id(self):
+        self.client.post(self.url, self.payload())
+        delivery = MailDelivery.objects.get()
+
+        first = _message_for(delivery).extra_headers["Message-ID"]
+        second = _message_for(delivery).extra_headers["Message-ID"]
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first,
+            f"<kururu-forms-{delivery.message_id.hex}@example.test>",
+        )
+
+    def test_stale_processing_delivery_is_quarantined_before_explicit_retry(self):
         self.client.post(self.url, self.payload())
         delivery = MailDelivery.objects.get()
         now = timezone.now()
@@ -233,17 +246,39 @@ class SubmissionTests(KururuFormsTestCase):
             update_fields=["status", "attempts", "locked_at", "locked_by"]
         )
 
-        self.assertTrue(process_next_delivery("replacement-worker", now=now))
+        with patch("contact_forms.mailer.EmailMessage.send") as send:
+            self.assertIsNone(process_next_delivery("replacement-worker", now=now))
+        send.assert_not_called()
 
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, MailDelivery.Status.UNKNOWN)
+        self.assertEqual(delivery.last_error, "DeliveryOutcomeUnknown")
+        self.assertEqual(
+            ContactSubmission.objects.get().status,
+            ContactSubmission.Status.MAIL_FAILED,
+        )
+
+        with self.assertRaises(CommandError):
+            call_command(
+                "resolve_contact_mail_delivery",
+                delivery.pk,
+                action="retry",
+            )
+
+        call_command(
+            "resolve_contact_mail_delivery",
+            delivery.pk,
+            action="retry",
+            confirm_duplicate_risk=True,
+        )
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, MailDelivery.Status.PENDING)
+        self.assertTrue(process_next_delivery("replacement-worker"))
         delivery.refresh_from_db()
         self.assertEqual(delivery.status, MailDelivery.Status.SENT)
         self.assertEqual(delivery.attempts, 2)
-        self.assertEqual(len(mail.outbox), 1)
 
-    def test_repeated_worker_crashes_stop_at_the_attempt_cap(self):
-        setting = ContactPluginSetting.load()
-        setting.mail_max_attempts = 1
-        setting.save(update_fields=["mail_max_attempts"])
+    def test_unknown_delivery_can_be_marked_sent_without_resending(self):
         self.client.post(self.url, self.payload())
         delivery = MailDelivery.objects.get()
         now = timezone.now()
@@ -257,17 +292,25 @@ class SubmissionTests(KururuFormsTestCase):
 
         with patch("contact_forms.mailer.EmailMessage.send") as send:
             self.assertIsNone(process_next_delivery("replacement-worker", now=now))
-
         send.assert_not_called()
+
+        call_command(
+            "resolve_contact_mail_delivery",
+            delivery.pk,
+            action="mark-sent",
+        )
+
         delivery.refresh_from_db()
-        self.assertEqual(delivery.status, MailDelivery.Status.FAILED)
-        self.assertEqual(delivery.last_error, "WorkerLeaseExpired")
+        self.assertEqual(delivery.status, MailDelivery.Status.SENT)
         self.assertEqual(
             ContactSubmission.objects.get().status,
-            ContactSubmission.Status.MAIL_FAILED,
+            ContactSubmission.Status.DELIVERED,
         )
-        self.assertFalse(
-            MailDelivery.objects.filter(kind=MailDelivery.Kind.AUTOREPLY).exists()
+        self.assertTrue(
+            MailDelivery.objects.filter(
+                kind=MailDelivery.Kind.AUTOREPLY,
+                status=MailDelivery.Status.PENDING,
+            ).exists()
         )
 
     def test_management_command_processes_outbox_without_web_request(self):
@@ -517,6 +560,52 @@ class MaintenanceTests(KururuFormsTestCase):
 
         self.assertTrue(ContactSubmission.objects.filter(pk=submission.pk).exists())
         self.assertTrue(MailDelivery.objects.filter(pk=delivery.pk).exists())
+
+    def test_purge_skips_submission_with_unknown_delivery(self):
+        self.form.retention_days = 1
+        self.form.save(update_fields=["retention_days"])
+        submission = ContactSubmission.objects.create(
+            form=self.form,
+            idempotency_key=uuid.uuid4(),
+            payload={"name": "unknown"},
+            ip_hash="0" * 64,
+        )
+        delivery = MailDelivery.objects.create(
+            submission=submission,
+            kind=MailDelivery.Kind.NOTIFICATION,
+            status=MailDelivery.Status.UNKNOWN,
+        )
+        ContactSubmission.objects.filter(pk=submission.pk).update(
+            submitted_at=timezone.now() - timedelta(days=2)
+        )
+
+        call_command("purge_contact_submissions")
+
+        self.assertTrue(ContactSubmission.objects.filter(pk=submission.pk).exists())
+        self.assertTrue(MailDelivery.objects.filter(pk=delivery.pk).exists())
+
+    def test_health_check_reports_unknown_delivery(self):
+        call_command(
+            "run_contact_forms_maintenance",
+            once=True,
+            interval_seconds=86_400,
+        )
+        submission = ContactSubmission.objects.create(
+            form=self.form,
+            idempotency_key=uuid.uuid4(),
+            payload={"name": "unknown"},
+            ip_hash="0" * 64,
+        )
+        MailDelivery.objects.create(
+            submission=submission,
+            kind=MailDelivery.Kind.NOTIFICATION,
+            status=MailDelivery.Status.UNKNOWN,
+        )
+
+        with self.assertRaises(CommandError) as caught:
+            call_command("check_contact_forms_health")
+
+        self.assertIn("unknown_deliveries=1", str(caught.exception))
 
     def test_periodic_purge_records_audit_and_health_check_passes(self):
         self.form.retention_days = 1

@@ -31,7 +31,10 @@ class Command(BaseCommand):
                         form=form,
                         submitted_at__lt=cutoff,
                     ).exclude(
-                        deliveries__status=MailDelivery.Status.PROCESSING
+                        deliveries__status__in=(
+                            MailDelivery.Status.PROCESSING,
+                            MailDelivery.Status.UNKNOWN,
+                        )
                     )
                     total += expired.count()
                     expired.delete()

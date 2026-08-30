@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
@@ -157,12 +158,14 @@ class MailDelivery(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "送信待ち"
         PROCESSING = "processing", "送信処理中"
+        UNKNOWN = "unknown", "配送結果不明"
         SENT = "sent", "送信済み"
         FAILED = "failed", "失敗"
 
     submission = models.ForeignKey(ContactSubmission, related_name="deliveries", on_delete=models.CASCADE)
     kind = models.CharField(max_length=20, choices=Kind.choices)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    message_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     attempts = models.PositiveSmallIntegerField(default=0)
     last_error = models.CharField(max_length=500, blank=True)
     available_at = models.DateTimeField(default=timezone.now, db_index=True)

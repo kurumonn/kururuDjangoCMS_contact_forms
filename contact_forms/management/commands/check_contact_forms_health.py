@@ -33,6 +33,12 @@ class Command(BaseCommand):
         if failed:
             issues.append(f"failed_deliveries={failed}")
 
+        unknown = MailDelivery.objects.filter(
+            status=MailDelivery.Status.UNKNOWN
+        ).count()
+        if unknown:
+            issues.append(f"unknown_deliveries={unknown}")
+
         stale = MailDelivery.objects.filter(
             Q(
                 status=MailDelivery.Status.PENDING,
