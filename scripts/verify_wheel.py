@@ -17,11 +17,15 @@ matches[0].load()
 
 package_root = Path(contact_forms.__file__).resolve().parent
 required = [
-    package_root / "migrations" / "0005_delivery_snapshots_retention_constraints.py",
+    package_root / "migrations" / "0006_maildelivery_unknown_message_id.py",
     package_root
     / "management"
     / "commands"
     / "process_contact_mail_outbox.py",
+    package_root
+    / "management"
+    / "commands"
+    / "resolve_contact_mail_delivery.py",
     package_root / "templates" / "contact_forms" / "block.html",
 ]
 missing = [str(path.relative_to(package_root)) for path in required if not path.is_file()]

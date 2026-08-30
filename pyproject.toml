@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "kururucms-contact-forms"
-version = "0.2.1"
+version = "0.2.2"
 description = "Secure, reusable contact form plugin for KururuCMS"
 readme = "README.md"
 requires-python = ">=3.12"
