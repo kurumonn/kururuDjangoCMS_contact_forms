@@ -64,8 +64,15 @@ jobs:
 
       - name: Audit runtime dependencies
         run: |
-          pip-audit --requirement requirements-audit.lock
-          pip-audit --vulnerability-service osv --requirement requirements-audit.lock
+          audit_with_retry() {
+            for attempt in 1 2; do
+              "$@" && return 0
+              [ "$attempt" -eq 2 ] && return 1
+              sleep 5
+            done
+          }
+          audit_with_retry pip-audit --requirement requirements-audit.lock
+          audit_with_retry pip-audit --vulnerability-service osv --requirement requirements-audit.lock
 
       - name: Check committed files for secrets
         run: python scripts/check_secrets.py
