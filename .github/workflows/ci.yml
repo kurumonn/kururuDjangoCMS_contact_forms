@@ -18,10 +18,10 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/cms
     steps:
       - name: Checkout plugin
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Checkout CMS integration branch
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kurumonn/kururuDjangoCMS
           ref: 609ad13a72e12c8d80d5c468de098b2a5dfb0a55  # pragma: allowlist secret
