@@ -33,10 +33,31 @@ def safe_return_path(value: str) -> str:
     return result[:500]
 
 
-def make_render_token(form_id: int, return_path: str) -> str:
+# instance は「ページ内で何個目のフォーム配置か」。
+# 入力エラーを出し直す先を特定するために持つ。同じフォームを2つ置いたとき、
+# 送ったのは2つ目なのに1つ目へ入力値が戻ると、
+# 利用者はどちらを直せばよいのか分からなくなる。
+#
+# 上限は記事のブロック数（CMS 側の上限は 300）より十分大きく取る。
+# 範囲外は 0＝「配置を特定できない」にする。1 に丸めると、
+# 特定できなかった入力値が無関係な1つ目のフォームに出てしまう。
+MAX_INSTANCE = 1000
+UNKNOWN_INSTANCE = 0
+
+
+def safe_instance(value) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return UNKNOWN_INSTANCE
+    return number if 1 <= number <= MAX_INSTANCE else UNKNOWN_INSTANCE
+
+
+def make_render_token(form_id: int, return_path: str, instance: int = 1) -> str:
     return signing.dumps(
         {
             "form_id": form_id,
+            "instance": safe_instance(instance),
             "idempotency_key": str(uuid.uuid4()),
             "return_path": safe_return_path(return_path),
             "shown_at": int(time.time()),
@@ -57,4 +78,6 @@ def load_render_token(token: str, form_id: int, minimum_fill_seconds: int):
     except (TypeError, ValueError, AttributeError):
         raise signing.BadSignature("invalid idempotency key")
     data["return_path"] = safe_return_path(data.get("return_path", "/"))
+    # instance を持たない古いトークンでも動くようにする。
+    data["instance"] = safe_instance(data.get("instance", 1))
     return data

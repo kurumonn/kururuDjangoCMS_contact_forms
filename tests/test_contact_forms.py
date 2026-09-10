@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import timedelta
 from unittest.mock import patch
@@ -5,11 +6,13 @@ from unittest.mock import patch
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
+from django.core.cache import cache
 from django.core.checks import run_checks
-from django.core import mail
+from django.core import mail, signing
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.management import call_command, CommandError
 from django.forms.models import inlineformset_factory
+from django.http import QueryDict
 from django.db import IntegrityError, transaction
 from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
@@ -17,9 +20,17 @@ from django.utils import timezone
 
 from blog.blocks import block_editor_catalog, validate_blocks
 from blog.templatetags.block_tags import render_blocks
+from blog.tests.factories import create_article
 from cms_plugins.models import PluginActivation
 
 from contact_forms.forms import build_submission_form
+from contact_forms.pending import (
+    MAX_AGE_SECONDS,
+    MAX_TOTAL_CHARS,
+    SESSION_KEY,
+    pop_invalid_submission,
+    remember_invalid_submission,
+)
 from contact_forms.admin import (
     ContactFieldInlineFormSet,
     ContactFormAdmin,
@@ -37,12 +48,23 @@ from contact_forms.models import (
     MailDelivery,
 )
 from contact_forms.plugin import BLOCK_NAME, PLUGIN_KEY
-from contact_forms.services import ip_hash, make_render_token, safe_return_path
+from contact_forms.services import (
+    SIGNING_NAMESPACE,
+    UNKNOWN_INSTANCE,
+    ip_hash,
+    load_render_token,
+    make_render_token,
+    safe_instance,
+    safe_return_path,
+)
 from contact_forms.views import manage
 
 
 class KururuFormsTestCase(TestCase):
     def setUp(self):
+        # レート制限のカウンタはキャッシュに残り、テストをまたいで積み上がる。
+        # 捨てないと「テストを増やしたら別のテストが落ちる」ようになる。
+        cache.clear()
         PluginActivation.objects.update_or_create(
             key=PLUGIN_KEY, defaults={"enabled": True}
         )
@@ -767,3 +789,300 @@ class AdminTests(KururuFormsTestCase):
         )
         self.assertNotIn("duplicate_forms", model_admin.get_actions(archive_request))
         self.assertIn("archive_forms", model_admin.get_actions(archive_request))
+
+
+class InvalidSubmissionRedisplayTests(KururuFormsTestCase):
+    """入力エラーのとき、元のページで入力値と項目別エラーを出し直せるか。
+
+    以前は共通の失敗メッセージを1つ出してリダイレクトするだけだったので、
+    利用者は「どの項目がなぜ駄目か」も「さっき書いた本文」も失っていた。
+    長い問い合わせ文を書き直させるのは、送信をあきらめさせるのとほぼ同じ。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.article = create_article(
+            title="問い合わせフォーム付きの記事",
+            blocks=[{"type": BLOCK_NAME, "data": {"form_id": self.form.pk}}],
+        )
+        self.page_path = self.article.get_absolute_url()
+
+    def submit_invalid(self, **overrides):
+        data = self.payload(
+            _render_token=make_render_token(self.form.pk, self.page_path),
+            email="not-an-email",
+        )
+        data.update(overrides)
+        return self.client.post(self.url, data)
+
+    def test_entered_values_and_field_errors_come_back_on_the_page(self):
+        response = self.submit_invalid(name="山田太郎")
+        self.assertRedirects(response, self.page_path, fetch_redirect_response=False)
+
+        html = self.client.get(self.page_path).content.decode()
+        prefix = f"kururu-form-{self.form.pk}-1"
+
+        # 入力値が残っている（書き直させない）。
+        self.assertIn('value="山田太郎"', html)
+        self.assertIn('value="not-an-email"', html)
+        # どの項目が駄目かが分かる。
+        self.assertIn(f'id="{prefix}-email-errors"', html)
+        self.assertIn('class="errorlist"', html)
+        # 支援技術にも入力欄とエラー文の対応が伝わる。
+        self.assertIn('aria-invalid="true"', html)
+        self.assertIn(f'aria-describedby="{prefix}-email-errors"', html)
+        # 問題のない項目にはエラー印を付けない。
+        self.assertNotIn(f'id="{prefix}-name-errors"', html)
+
+    def test_values_are_shown_once_and_then_cleared(self):
+        self.submit_invalid()
+        self.assertIn("not-an-email", self.client.get(self.page_path).content.decode())
+        # 2回目の表示には残さない。リロードで古い入力が復活すると混乱する。
+        self.assertNotIn(
+            "not-an-email", self.client.get(self.page_path).content.decode()
+        )
+
+    def test_secrets_are_not_carried_over(self):
+        submitted_token = make_render_token(self.form.pk, self.page_path)
+        self.client.post(
+            self.url,
+            self.payload(_render_token=submitted_token, email="not-an-email"),
+        )
+        html = self.client.get(self.page_path).content.decode()
+        # 使い終わった署名トークンは持ち越さず、描画のたびに作り直す。
+        self.assertNotIn(submitted_token, html)
+        # ハニーポットに値を書き戻すと、正規の利用者がボット判定される。
+        self.assertIn('name="_company" tabindex="-1"', html)
+
+    def test_values_do_not_leak_into_a_different_form(self):
+        other = ContactForm.objects.create(
+            name="別のフォーム",
+            slug="other",
+            recipient_email="owner@example.test",
+        )
+        ContactField.objects.create(
+            form=other, key="name", label="お名前",
+            kind=ContactField.Kind.TEXT, required=True, order=1,
+        )
+        other.is_active = True
+        other.save(update_fields=["is_active"])
+        other_article = create_article(
+            title="別フォームの記事",
+            blocks=[{"type": BLOCK_NAME, "data": {"form_id": other.pk}}],
+        )
+
+        self.submit_invalid(name="山田太郎")
+        html = self.client.get(other_article.get_absolute_url()).content.decode()
+        self.assertNotIn("山田太郎", html)
+        # 預けたままのものは、本来のフォームの側でちゃんと使える。
+        self.assertIn("山田太郎", self.client.get(self.page_path).content.decode())
+
+    def test_oversized_input_falls_back_to_the_shared_message(self):
+        """セッションを太らせない。上限を超えたら預けず、従来どおりの案内にする。"""
+        self.form.fields.filter(key="message").update(max_length=MAX_TOTAL_CHARS * 2)
+        self.submit_invalid(message="あ" * (MAX_TOTAL_CHARS + 1))
+        html = self.client.get(self.page_path).content.decode()
+        self.assertNotIn("not-an-email", html)
+        self.assertIn(self.form.error_message, html)
+
+    def test_values_come_back_to_the_form_that_was_submitted(self):
+        """同じフォームを2つ置いた記事で、送った側にだけ入力値が戻ること。
+
+        戻り先を「フォームのID」だけで決めると、2つ目を送っても
+        1つ目に入力値とエラーが出る。利用者はどちらを直せばよいのか分からない。
+        """
+        article = create_article(
+            title="同じフォームを2つ置いた記事",
+            blocks=[
+                {"type": BLOCK_NAME, "data": {"form_id": self.form.pk}},
+                {"type": BLOCK_NAME, "data": {"form_id": self.form.pk}},
+            ],
+        )
+        path = article.get_absolute_url()
+        self.client.post(
+            self.url,
+            self.payload(
+                _render_token=make_render_token(self.form.pk, path, 2),
+                name="2つ目から送った",
+                email="not-an-email",
+            ),
+        )
+
+        sections = re.findall(
+            r'<section class="kururu-form".*?</section>',
+            self.client.get(path).content.decode(),
+            re.S,
+        )
+        self.assertEqual(len(sections), 2)
+        self.assertNotIn("2つ目から送った", sections[0])
+        self.assertIn("2つ目から送った", sections[1])
+        self.assertNotIn("aria-invalid", sections[0])
+        self.assertIn('aria-invalid="true"', sections[1])
+
+    def test_values_wait_for_their_own_placement(self):
+        """送信元の配置が無いページでは取り出さず、戻ってきたときに渡す。"""
+        two_forms = create_article(
+            title="2つ置いた記事",
+            blocks=[
+                {"type": BLOCK_NAME, "data": {"form_id": self.form.pk}},
+                {"type": BLOCK_NAME, "data": {"form_id": self.form.pk}},
+            ],
+        )
+        two_path = two_forms.get_absolute_url()
+        self.client.post(
+            self.url,
+            self.payload(
+                _render_token=make_render_token(self.form.pk, two_path, 2),
+                name="2つ目から送った",
+                email="not-an-email",
+            ),
+        )
+
+        # 1つしか置いていないページでは、2つ目の配置が無いので出さない。
+        self.assertNotIn(
+            "2つ目から送った", self.client.get(self.page_path).content.decode()
+        )
+        # 元のページへ戻れば、2つ目にちゃんと出る。
+        self.assertIn("2つ目から送った", self.client.get(two_path).content.decode())
+
+    def test_stale_values_are_dropped_instead_of_reappearing_later(self):
+        """時間が経った入力値は復活させない。"""
+        request = RequestFactory().post("/")
+        request.session = {}
+        data = QueryDict(mutable=True)
+        data["name"] = "山田"
+        self.assertTrue(remember_invalid_submission(request, self.form, data))
+
+        request.session[SESSION_KEY]["at"] -= MAX_AGE_SECONDS + 1
+        self.assertIsNone(pop_invalid_submission(request, self.form.pk))
+        self.assertNotIn(SESSION_KEY, request.session)
+
+    def test_render_token_instance_is_bounded(self):
+        """署名済みでも、instance の値はそのまま信用しない。"""
+        for value in (0, -3, 10_000, "x", None):
+            with self.subTest(value=value):
+                # 0 は「配置を特定できない」。1 に丸めると、
+                # 無関係な1つ目のフォームに入力値が出てしまう。
+                self.assertEqual(safe_instance(value), 0)
+        self.assertEqual(safe_instance(2), 2)
+
+    def test_unidentified_placement_never_lands_on_another_form(self):
+        """配置が特定できない入力値は、どのフォームにも出さない。"""
+        request = RequestFactory().post("/")
+        request.session = {}
+        data = QueryDict(mutable=True)
+        data["name"] = "配置不明の入力"
+        self.assertTrue(
+            remember_invalid_submission(
+                request, self.form, data, UNKNOWN_INSTANCE
+            )
+        )
+        for instance in (1, 2, 3):
+            with self.subTest(instance=instance):
+                self.assertIsNone(
+                    pop_invalid_submission(request, self.form.pk, instance)
+                )
+
+    def test_render_token_instance_is_clamped_when_loaded(self):
+        """署名済みのトークンでも、範囲外の instance はそのまま使わない。
+
+        署名があるので外部から改ざんはできないが、値の妥当性と
+        署名の正しさは別の話。範囲を外れたものは既定値へ丸める。
+        """
+        token = signing.dumps(
+            {
+                "form_id": self.form.pk,
+                "instance": 10_000,
+                "idempotency_key": str(uuid.uuid4()),
+                "return_path": "/articles/example/",
+                "shown_at": int(timezone.now().timestamp()),
+            },
+            salt=SIGNING_NAMESPACE,
+            compress=True,
+        )
+        self.assertEqual(load_render_token(token, self.form.pk, 0)["instance"], 0)
+
+    def test_multiple_choice_values_survive_the_round_trip(self):
+        """チェックボックスの複数選択が1つに潰れないこと。"""
+        ContactField.objects.create(
+            form=self.form, key="topics", label="ご興味",
+            kind=ContactField.Kind.CHECKBOX, options=["料金", "導入支援"], order=4,
+        )
+        request = RequestFactory().post("/")
+        request.session = {}
+        data = QueryDict(mutable=True)
+        data["name"] = "山田"
+        data.setlist("topics", ["料金", "導入支援"])
+
+        self.assertTrue(remember_invalid_submission(request, self.form, data))
+        restored = pop_invalid_submission(request, self.form.pk)
+        self.assertEqual(restored.getlist("topics"), ["料金", "導入支援"])
+        # 取り出したら消す（2回目は None）。
+        self.assertIsNone(pop_invalid_submission(request, self.form.pk))
+
+
+class FormIdentityTests(KururuFormsTestCase):
+    """1ページに複数のフォームを置いても HTML の id が衝突しないか。
+
+    Django の既定では項目名から id が決まるため、`email` を持つフォームを
+    2つ置くと両方が id_email になる。ラベルをクリックしても
+    1つ目の入力欄にフォーカスが移り、支援技術も対応を取り違える。
+    """
+
+    def render_page(self, *form_ids):
+        article = create_article(
+            title="フォームを並べた記事",
+            blocks=[
+                {"type": BLOCK_NAME, "data": {"form_id": form_id}}
+                for form_id in form_ids
+            ],
+        )
+        return self.client.get(article.get_absolute_url()).content.decode()
+
+    def form_ids(self, html):
+        return [
+            value
+            for value in re.findall(r'\sid="([^"]+)"', html)
+            if value.startswith("kururu-form")
+        ]
+
+    def test_two_placements_of_the_same_form_get_unique_ids(self):
+        html = self.render_page(self.form.pk, self.form.pk)
+
+        ids = self.form_ids(html)
+        expected = 2 * (1 + self.form.fields.count())  # 見出し + 各入力欄
+        self.assertEqual(len(ids), expected)
+        self.assertEqual(len(ids), len(set(ids)), f"id が重複しています: {ids}")
+
+    def test_every_label_points_at_an_existing_input(self):
+        html = self.render_page(self.form.pk, self.form.pk)
+
+        ids = set(self.form_ids(html))
+        targets = [
+            value
+            for value in re.findall(r'\sfor="([^"]+)"', html)
+            if value.startswith("kururu-form")
+        ]
+        self.assertEqual(len(targets), 2 * self.form.fields.count())
+        for target in targets:
+            self.assertIn(target, ids)
+        # 参照先が全部ばらばら＝それぞれ自分の入力欄を指している。
+        self.assertEqual(len(targets), len(set(targets)))
+
+    def test_section_headings_are_addressable_individually(self):
+        html = self.render_page(self.form.pk, self.form.pk)
+        labelled_by = re.findall(r'aria-labelledby="([^"]+)"', html)
+        self.assertEqual(len(labelled_by), 2)
+        self.assertEqual(len(set(labelled_by)), 2)
+        for value in labelled_by:
+            self.assertIn(f'id="{value}"', html)
+
+    def test_submitted_field_names_stay_the_same(self):
+        """name は分けない。送信先URLがフォームごとに違うので取り違えない。"""
+        html = self.render_page(self.form.pk, self.form.pk)
+        sections = re.findall(
+            r'<section class="kururu-form".*?</section>', html, re.S
+        )
+        self.assertEqual(len(sections), 2)
+        for section in sections:
+            self.assertEqual(section.count('name="email"'), 1)

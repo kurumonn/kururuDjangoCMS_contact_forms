@@ -1,17 +1,38 @@
 {% if contact_form %}
-  <section class="kururu-form" aria-labelledby="kururu-form-{{ contact_form.pk }}">
-    <h2 id="kururu-form-{{ contact_form.pk }}">{{ contact_form.name }}</h2>
+  {# form_dom_id はページ内で一意。フォームの主キーだけで id を作ると、  #}
+  {# 同じフォームを1ページに2回置いたときに id が衝突し、ラベルを      #}
+  {# クリックしても1つ目の入力欄へフォーカスが飛ぶ。                    #}
+  <section class="kururu-form" aria-labelledby="{{ form_dom_id }}-title">
+    <h2 id="{{ form_dom_id }}-title">{{ contact_form.name }}</h2>
     <form method="post" action="{{ submit_url }}">
       {% csrf_token %}
       <input type="hidden" name="_render_token" value="{{ render_token }}">
       <div hidden aria-hidden="true">
         <label>会社URL <input type="text" name="_company" tabindex="-1" autocomplete="off"></label>
       </div>
+      {# ページ上部には共通の失敗メッセージが出る。ここでは「どの項目が    #}
+      {# なぜ駄目か」だけを出す。共通メッセージを二重に出さない。         #}
+      {% if submission_form.non_field_errors %}
+        <div class="notice notice--warning" id="{{ form_dom_id }}-summary" role="alert">
+          <ul class="errorlist">
+            {% for error in submission_form.non_field_errors %}
+              <li class="error">{{ error }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
       {% for field in submission_form %}
         <div class="field">
           {{ field.label_tag }}
           {{ field }}
           {% if field.help_text %}<p class="help">{{ field.help_text }}</p>{% endif %}
+          {% if field.errors %}
+            <ul class="errorlist" id="{{ field.auto_id }}-errors">
+              {% for error in field.errors %}
+                <li class="error">{{ error }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
         </div>
       {% endfor %}
       <button type="submit" class="btn btn--primary">送信</button>

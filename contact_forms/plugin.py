@@ -4,12 +4,14 @@ from django.urls import reverse
 from cms_plugins.registry import EditorField, PluginBlock, PluginDefinition
 
 from . import __version__
-from .forms import build_submission_form
+from .forms import build_submission_form, mark_invalid_fields
 from .models import ContactForm
+from .pending import pop_invalid_submission
 from .services import make_render_token
 
 PLUGIN_KEY = "kururu_forms"
 BLOCK_NAME = "kururu_forms.contact_form"
+INSTANCE_COUNTER = "_kururu_forms_rendered"
 
 
 def form_choices():
@@ -35,6 +37,18 @@ def validate_block(data):
     return {"form_id": form_id}
 
 
+def next_instance_id(request) -> int:
+    """このリクエストで何個目のフォームかを数える。
+
+    同じフォームを1ページに2回置くことも、別のフォームを並べることもある。
+    どちらの場合も HTML の id が衝突しないよう、描画のたびに増える番号を
+    id の一部にする。フォームの主キーだけでは前者を区別できない。
+    """
+    rendered = getattr(request, INSTANCE_COUNTER, 0) + 1
+    setattr(request, INSTANCE_COUNTER, rendered)
+    return rendered
+
+
 def block_context(request, data):
     if request is None:
         return {"contact_form": None}
@@ -51,10 +65,28 @@ def block_context(request, data):
     )
     if contact_form is None:
         return {"contact_form": None}
+
+    instance = next_instance_id(request)
+    dom_id = f"kururu-form-{contact_form.pk}-{instance}"
+
+    # 直前の送信が入力エラーだった場合だけ、入力値を復元して
+    # 同じ検証をやり直す。エラー文はここで作り直されるので、
+    # セッションへエラーメッセージそのものを持ち越す必要がない。
+    previous = pop_invalid_submission(request, contact_form.pk, instance)
+    submission_form = build_submission_form(
+        contact_form, data=previous, auto_id=f"{dom_id}-%s"
+    )
+    if previous is not None:
+        submission_form.is_valid()
+        mark_invalid_fields(submission_form)
+
     return {
         "contact_form": contact_form,
-        "submission_form": build_submission_form(contact_form),
-        "render_token": make_render_token(contact_form.pk, request.get_full_path()),
+        "form_dom_id": dom_id,
+        "submission_form": submission_form,
+        "render_token": make_render_token(
+            contact_form.pk, request.get_full_path(), instance
+        ),
         "submit_url": reverse("kururu_forms:submit", args=[contact_form.slug]),
     }
 

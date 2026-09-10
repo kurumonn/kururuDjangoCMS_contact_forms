@@ -16,6 +16,7 @@ from core.ratelimit import check_rate_limit, client_ip
 from .forms import build_submission_form, serializable_payload
 from .mailer import enqueue_submission
 from .models import ContactForm, ContactPluginSetting, ContactSubmission
+from .pending import remember_invalid_submission
 from .plugin import PLUGIN_KEY
 from .services import ip_hash, load_render_token
 
@@ -86,7 +87,13 @@ def submit(request, slug):
 
     submitted = build_submission_form(contact_form, request.POST)
     if not submitted.is_valid():
+        # 入力値を1回分だけセッションへ預けて元のページへ戻す。
+        # 戻った先の描画（plugin.block_context）が取り出して、
+        # 入力値つき・項目別エラーつきでフォームを出し直す。
         messages.error(request, contact_form.error_message)
+        remember_invalid_submission(
+            request, contact_form, request.POST, token_data["instance"]
+        )
         return HttpResponseRedirect(token_data["return_path"])
 
     with transaction.atomic():
