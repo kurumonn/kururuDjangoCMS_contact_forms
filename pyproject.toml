@@ -9,7 +9,7 @@ description = "Secure, reusable contact form plugin for KururuCMS"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["Django>=5.2,<5.3"]
+dependencies = ["Django>=5.2,<6.2"]
 
 [project.entry-points."kururucms.plugins"]
 contact_forms = "contact_forms.apps:ContactFormsConfig"
