@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: kurumonn/kururuDjangoCMS
-          ref: bdb7f518fe471a2471a9e168dbb3040e42b39ed5  # pragma: allowlist secret
+          ref: 609ad13a72e12c8d80d5c468de098b2a5dfb0a55  # pragma: allowlist secret
           path: cms
 
       - name: Set up Python
